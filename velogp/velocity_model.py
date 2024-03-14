@@ -1,0 +1,206 @@
+from typing import Any, Dict, Optional, Union, Tuple
+import torch
+from torch import nn
+from torch import *
+from builtins import float, int
+
+class VelocityModel(nn.Module):
+    int32_min : int = -2**31
+    int32_max : int = 2**31 - 1
+
+    def __init__(self, genome_length: int, is_circular: bool, origins: IntTensor, h_tgrid: DoubleTensor, g_xranges_l: IntTensor, g_xranges_u: IntTensor):
+        super().__init__()
+        # Genome
+        self.genome_length = genome_length
+        self.is_circular = is_circular
+        # Growth rate
+        self.growthrate = nn.Parameter(tensor([1/3600]))
+        # Baseline velocity
+        self.v0 = nn.Parameter(tensor([100.0]))
+        # Grid on which h(t) is defined as a piece-wise constant (right-continuous) function
+        self.h_tgrid = h_tgrid
+        # Check that h_tgrid is a 1-d tensor with entries in ascending order
+        assert (self.h_tgrid.dim() == 1)
+        assert all(self.h_tgrid < cat((self.h_tgrid[1:], tensor([float('inf')])))).detach().item()
+        self.h_tgrid_len = cat((self.h_tgrid[1:], tensor([float('inf')]))) - self.h_tgrid
+        self.h_log = nn.Parameter(zeros(h_tgrid.size(), dtype=torch.double))
+        # Origins of replication
+        self.origins = origins
+        # Check that origins is a 1-d tensor with entries in ascending order
+        assert (self.origins.dim() == 1)
+        assert all(self.origins < cat((self.origins[1:], tensor([float('inf')])))).detach().item()
+        # Origins of replication, augmented to account for wrap-around if the genome is circular
+        if self.is_circular:
+            self.origins_augmented = cat((self.origins[-1] - tensor([genome_length]), self.origins, tensor([genome_length]) + self.origins[0]))
+        else:
+            self.origins_augmented = self.origins
+        # Replication delayys
+        self.delay = nn.Parameter(zeros_like(self.origins))
+        # Intervals on which g(x) differs from 1.0
+        self.g_xranges_l = g_xranges_l
+        self.g_xranges_u = g_xranges_u
+        # Check that g_xranges_l, g_xranges_u are a 1-d tensors with the same length
+        assert (self.g_xranges_l.dim() == 1) and (self.g_xranges_u.dim() == 1)
+        assert self.g_xranges_l.size() == self.g_xranges_u.size()
+        # Check that g_xranges_l[i] < g_xranges_u[i] <= g_xranges_l[i+1]
+        assert all(self.g_xranges_l < self.g_xranges_u).detach().item()
+        assert all(self.g_xranges_u <= cat((self.g_xranges_l[1:], tensor([float('inf')])))).detach().item()
+        # Grid on which g(x) is defined, derived from g_xranges_l, g_xranges_u
+        self.g_xgrid = cat((tensor([0]), flatten(stack((self.g_xranges_l, self.g_xranges_u), dim=1))))
+        self.g_xgrid_len = cat((self.g_xgrid[1:], tensor([genome_length]))) - self.g_xgrid
+        self.g_log = nn.Parameter(zeros(self.g_xranges_l.size(), dtype=torch.double))
+
+    def H(self, t: Tensor) -> Tensor:
+        """Evaluates H(t) = int_0^t h(u) du at the specified points t
+
+        h(t) is right-continuous and piece-wise constant on the (fixed) grid h_tgrid and obeys h(h_tgrid[i]) = h[i].
+
+        :param t: Times t as a tensor of arbitrary shape
+        :return: H(t) as a tensor of the same shape as t
+        """
+        # Tensor dist_ij = t[j] - h_tgrid[i] (j can comprise multiple indices)
+        dist = t[None,...] - self.h_tgrid[(...,) + (None,) * t.dim()]
+        # Tensors with the same shape as dist which contain 0 respectively h_tgrid[i+1] - h_tgrid[i].
+        zeros = zeros_like(dist)
+        length = ones_like(dist) * self.h_tgrid_len[(...,) + (None,) * t.dim()]
+        # Tensor containing the length of the intersection of [0, t[j]] and [h_tgrid[i], h_tgrid[i+1]]
+        c = maximum(zeros, minimum(dist, length))
+        # H(t[j]) = sum_i h[i] * c[i,j]
+        return sum(c * exp(self.h_log[(...,) + (None,) * t.dim()]), dim=0)
+
+    def Hinv(self, u: Tensor) -> Tensor:
+        """Evaluates H^-1(u) at the specified points u
+
+        :param u: Points at which to evaluate H^-1
+        :return: H^-1(u) at the specified points u
+        """
+        assert all(u >= self.h_tgrid[0])
+        # Compute H(t) on the (fixed) grid h_tgrid (we could call H here, but this is faster)
+        H_tgrid = cat((tensor([0.0]), torch.cumsum(self.h_tgrid_len * exp(self.h_log), dim=0)))
+        # Find t_i where H(t_i) <= u but H(t_(i+1)) > u
+        lt = u[None, ...] < H_tgrid[(...,) + (None,) * u.dim()]
+        idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
+        # Within [t_i, t_(i+1)] the function H is piece-wise linear, i.e.
+        #   H(t) = H(t_i) + (t - t_i) * exp(h[i])
+        # and its inverse is thus
+        #   H^-1(u) = t_i + (u - H(t_i)) / exp(h[i])
+        return self.h_tgrid[idx] + (u - H_tgrid[idx]) / exp(self.h_log[idx])
+
+    def G_0(self, x: Tensor) -> Tensor:
+        """
+        Evaluates G_0(x) = int_0^x du
+
+        g(x) is piece-wise constant and = 1 except on the intervals [g_xranges_l[i], g_xranges_u[i]] where g(x) = g[i].
+
+        :param x:  Locations as a tensor of arbitrary shape
+        :return: G(x,o) as a tensor of the same shape as x
+        """
+        assert all(logical_and(x >= tensor([0]), x <= tensor([self.genome_length])))
+        # Tensor dist_ij = x[j] - g_xgrid[i] (j can comprise multiple indices)
+        dist = x[None,...] - self.g_xgrid[(...,) + (None,) * x.dim()]
+        # Tensors with the same shape as dist which contain 0 respectively g_xgrid[i+1] - g_xgrid[i].
+        zeros = zeros_like(dist)
+        length = ones_like(dist) * self.g_xgrid_len[(...,) + (None,) * x.dim()]
+        # Tensor containing the length of the intersection of [0, t[j]] and [h_tgrid[i], h_tgrid[i+1]]
+        c = maximum(zeros, minimum(dist, length))
+        # Create vector of values of g(x) at the grid points g_xgrid
+        g_log_inczero = cat((tensor([0.0]), flatten(stack((self.g_log, zeros_like(self.g_log)), dim=1))))
+        # G(x[j]) = sum_i g[i] * c[i,j]
+        return sum(c * exp(g_log_inczero[(...,) + (None,) * x.dim()]), dim=0)
+
+    def G(self, x: Tensor, o: Tensor, d: Tensor) -> Tensor:
+        """
+        Evaluates G(x,o) = | int_p g(u) du | for the triples (x, o, d) where p is a path from o to x in direction d.
+
+        g(x) is piece-wise constant and = 1 except on the intervals [g_xranges_l[i], g_xranges_u[i]] where g(x) = g[i].
+
+        :param x:  Genomic locations as a tensor of arbitrary shape
+        :param o: Origins as tensor of the same shape as x
+        :return: G(x,o) as a tensor of the same shape as x
+        """
+        result = (self.G_0(x) - self.G_0(o)) * sign(d)
+        wrap = logical_or(logical_and(x < o, d > tensor([0])), logical_and(o < x, d < tensor([0])))
+        result[wrap] = self.G_0(tensor([self.genome_length])) + result[wrap]
+        return result
+
+    def surrounding_origins(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Returns a pair (l, r) of tensors of the same shape as x containing the closest left and right origin location
+
+        :param x: tensor containing genomic locations
+        :return: pair (l, r) of tensors containg the closest left and right origin location
+        """
+        assert all(logical_and(x >= tensor([0]), x <= tensor([self.genome_length])))
+        # Compute distance between locations x and origins
+        # Note: For origins o_1,o_2,...,o_k on a circular genome of length L,
+        #       origins_augmented contains o_0 = -(L - o_k), o_1, ..., o_k, o_(k+1) = L + o_1
+        dist = x[None,...] - self.origins_augmented[(...,) + (None,) * x.dim()]
+        k = self.origins.size()[0]
+        # Find index of closest origin to the left of each x
+        l_idx = argmin(where(dist >= tensor([0]), dist, tensor([self.int32_max])), dim=0)
+        if self.is_circular:
+            # If the closest origin is o_0, it's actually o_k and the path wraps around the circular genome
+            l_idx = where(l_idx == tensor([0]), tensor([k]), l_idx) - tensor([1])
+        # Find index of closest origin to the right of each x
+        r_idx = argmax(where(dist <= tensor([0]), dist, tensor([self.int32_min])), dim=0)
+        if self.is_circular:
+            # If the closest origin is o_(k+1), it's actually o_1 and the path wraps around the circular genome
+            r_idx = where(r_idx == tensor([k+1]), tensor([1]), r_idx) - tensor([1])
+        # Return origin positions
+        return l_idx, r_idx
+
+    def T(self, x: Tensor) -> Tensor:
+        """Returns the virtual replication time T(x)
+
+        T(x) = min { Delta_l + int_(o_l)^x g(u)/v0 du, Delta_r + int_x^(o_r) g(u)/v0 du }, which is the virtual time
+        at which the location x, surrounded by origins o_l on the left and o_r on the right is replicated. Delta_l,
+        Delta_r are the delays with which these origins fire.
+
+        :param x: Genomic locations as a tensor of arbitrary shape
+        :return: Virtual replication times as a tensor of the same shape
+        """
+        (i_left, i_right) = self.surrounding_origins(x)
+        t_left = self.delay[i_left] + self.G(x, self.origins[i_left], tensor([+1.0])) / self.v0
+        t_right = self.delay[i_right] + self.G(x, self.origins[i_right], tensor([-1.0])) / self.v0
+        return minimum(t_left, t_right)
+
+    def P(self, x: Tensor) -> Tensor:
+        """Returns the predicted DNA abundance P(x)
+        :param x: Genomic locations as a tensor of arbitrary shape
+        :return: Predicted DNA abundance
+        """
+        return exp(- self.growthrate * self.Hinv(self.T(x)))
+
+    def forward(self, x: Tensor):
+        P(x)
+        pass
+
+    def h_cov(self) -> Tensor:
+        return self.h_sigma2 * exp(- (self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2 / (2 * self.h_lengthscale))
+
+    def h_cov_inv(self) -> Tensor:
+        return cholesky_inverse(self.h_cov())
+
+    def penalty(self):
+        0.5 * matmul(self.h_log[None, :], matmul(self.h_cov_inv(), self.h_log))
+
+class VelocityModelLoss(nn.Module):
+    def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel):
+        super().__init__()
+        self.model = model
+        self.x = x
+        assert self.x.dim() == 1
+        self.y_obs = y_obs
+        self.s_obs = s_obs
+        assert self.y_obs.dim() in [1, 2]
+        assert self.y_obs.size()[0] == self.x.size()[0]
+        assert self.s_obs.size() == self.y_obs.size()
+        self.y_obs_mean = mean(self.y_obs, dim=0, keepdim=True)
+        self.weights = tensor([1.0]) / (self.s_obs ** 2)
+
+    def forward(self) -> Tensor:
+        y_pred = self.model.forward(self.x)
+        scale = self.y_obs_means * mean(y_pred)
+        assert scale.dim() == self.y_obs.dim()
+        assert scale.size()[0] == 1
+        return (0.5 * sum(self.weights * ((self.y_obs - scale * y_pred) ** 2)) + self.model.penalty())
