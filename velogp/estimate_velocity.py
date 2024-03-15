@@ -1,21 +1,22 @@
 from typing import Any, Dict, Optional, Union, Tuple
 import torch
-from jinja2 import optimizer
-from torch import nn
+from torch import nn, optim
 from torch import *
-from builtins import float, int
+from builtins import float, int, range
 
 class FitModel:
-    def __init__(self, model: nn.Module, loss: nn.Module, optimizer: torch.optim):
+    def __init__(self, model: nn.Module, loss: nn.Module):
         self.model = model
         self.loss = loss
-        self.optimizer = optimizer
 
     def optimize(self, iterations: int):
-        for i in range(iterations):
-            l = self.loss.forward()
+        self.optimizer = optim.SGD(self.model.parameters())
+
+        for i in range(0, iterations):
+            # Compute loss
+            l = self.loss()
             # backward pass
-            optimizer.zero_grad()
-            l.backward()
+            self.optimizer.zero_grad()
+            l.backward(retain_graph=True)
             # update weights
-            optimizer.step()
+            self.optimizer.step()

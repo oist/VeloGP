@@ -4,6 +4,9 @@ from torch import nn
 from torch import *
 from builtins import float, int
 
+def dtensor(v) -> DoubleTensor:
+    return torch.tensor(v, dtype=torch.double)
+
 class VelocityModel(nn.Module):
     int32_min : int = -2**31
     int32_max : int = 2**31 - 1
@@ -14,40 +17,46 @@ class VelocityModel(nn.Module):
         self.genome_length = genome_length
         self.is_circular = is_circular
         # Growth rate
-        self.growthrate = nn.Parameter(tensor([1/3600]))
+        self.growthrate = dtensor([1/3600])
         # Baseline velocity
-        self.v0 = nn.Parameter(tensor([100.0]))
+        self.v0 = nn.Parameter(dtensor([100.0]))
+        # Gaussian process hyperparameters
+        self.h_lengthscale = tensor([1e4])
+        self.h_sigma = tensor([0.1])
         # Grid on which h(t) is defined as a piece-wise constant (right-continuous) function
         self.h_tgrid = h_tgrid
         # Check that h_tgrid is a 1-d tensor with entries in ascending order
+        assert (self.h_tgrid.dtype == torch.double)
         assert (self.h_tgrid.dim() == 1)
-        assert all(self.h_tgrid < cat((self.h_tgrid[1:], tensor([float('inf')])))).detach().item()
-        self.h_tgrid_len = cat((self.h_tgrid[1:], tensor([float('inf')]))) - self.h_tgrid
+        assert all(self.h_tgrid < cat((self.h_tgrid[1:], dtensor([float('inf')])))).detach().item()
+        self.h_tgrid_len = cat((self.h_tgrid[1:], dtensor([float('inf')]))) - self.h_tgrid
         self.h_log = nn.Parameter(zeros(h_tgrid.size(), dtype=torch.double))
         # Origins of replication
         self.origins = origins
         # Check that origins is a 1-d tensor with entries in ascending order
+        assert (self.origins.dtype == torch.int32)
         assert (self.origins.dim() == 1)
-        assert all(self.origins < cat((self.origins[1:], tensor([float('inf')])))).detach().item()
+        assert all(self.origins < cat((self.origins[1:], dtensor([float('inf')])))).detach().item()
         # Origins of replication, augmented to account for wrap-around if the genome is circular
         if self.is_circular:
-            self.origins_augmented = cat((self.origins[-1] - tensor([genome_length]), self.origins, tensor([genome_length]) + self.origins[0]))
+            self.origins_augmented = cat((self.origins[-1] - dtensor([genome_length]), self.origins, dtensor([genome_length]) + self.origins[0]))
         else:
             self.origins_augmented = self.origins
         # Replication delayys
-        self.delay = nn.Parameter(zeros_like(self.origins))
+        self.delay = nn.Parameter(zeros_like(self.origins, dtype=torch.double))
         # Intervals on which g(x) differs from 1.0
         self.g_xranges_l = g_xranges_l
         self.g_xranges_u = g_xranges_u
         # Check that g_xranges_l, g_xranges_u are a 1-d tensors with the same length
+        assert (self.g_xranges_l.dtype == torch.int32) and (self.g_xranges_u.dtype == torch.int32)
         assert (self.g_xranges_l.dim() == 1) and (self.g_xranges_u.dim() == 1)
         assert self.g_xranges_l.size() == self.g_xranges_u.size()
         # Check that g_xranges_l[i] < g_xranges_u[i] <= g_xranges_l[i+1]
         assert all(self.g_xranges_l < self.g_xranges_u).detach().item()
-        assert all(self.g_xranges_u <= cat((self.g_xranges_l[1:], tensor([float('inf')])))).detach().item()
+        assert all(self.g_xranges_u <= cat((self.g_xranges_l[1:], dtensor([float('inf')])))).detach().item()
         # Grid on which g(x) is defined, derived from g_xranges_l, g_xranges_u
         self.g_xgrid = cat((tensor([0]), flatten(stack((self.g_xranges_l, self.g_xranges_u), dim=1))))
-        self.g_xgrid_len = cat((self.g_xgrid[1:], tensor([genome_length]))) - self.g_xgrid
+        self.g_xgrid_len = cat((self.g_xgrid[1:], dtensor([genome_length]))) - self.g_xgrid
         self.g_log = nn.Parameter(zeros(self.g_xranges_l.size(), dtype=torch.double))
 
     def H(self, t: Tensor) -> Tensor:
@@ -76,7 +85,7 @@ class VelocityModel(nn.Module):
         """
         assert all(u >= self.h_tgrid[0])
         # Compute H(t) on the (fixed) grid h_tgrid (we could call H here, but this is faster)
-        H_tgrid = cat((tensor([0.0]), torch.cumsum(self.h_tgrid_len * exp(self.h_log), dim=0)))
+        H_tgrid = cat((dtensor([0.0]), torch.cumsum(self.h_tgrid_len * exp(self.h_log), dim=0)))
         # Find t_i where H(t_i) <= u but H(t_(i+1)) > u
         lt = u[None, ...] < H_tgrid[(...,) + (None,) * u.dim()]
         idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
@@ -104,7 +113,7 @@ class VelocityModel(nn.Module):
         # Tensor containing the length of the intersection of [0, t[j]] and [h_tgrid[i], h_tgrid[i+1]]
         c = maximum(zeros, minimum(dist, length))
         # Create vector of values of g(x) at the grid points g_xgrid
-        g_log_inczero = cat((tensor([0.0]), flatten(stack((self.g_log, zeros_like(self.g_log)), dim=1))))
+        g_log_inczero = cat((dtensor([0.0]), flatten(stack((self.g_log, zeros_like(self.g_log)), dim=1))))
         # G(x[j]) = sum_i g[i] * c[i,j]
         return sum(c * exp(g_log_inczero[(...,) + (None,) * x.dim()]), dim=0)
 
@@ -120,7 +129,7 @@ class VelocityModel(nn.Module):
         """
         result = (self.G_0(x) - self.G_0(o)) * sign(d)
         wrap = logical_or(logical_and(x < o, d > tensor([0])), logical_and(o < x, d < tensor([0])))
-        result[wrap] = self.G_0(tensor([self.genome_length])) + result[wrap]
+        result = where(wrap, result + self.G_0(tensor([self.genome_length])), result)
         return result
 
     def surrounding_origins(self, x: Tensor) -> Tuple[Tensor, Tensor]:
@@ -160,8 +169,8 @@ class VelocityModel(nn.Module):
         :return: Virtual replication times as a tensor of the same shape
         """
         (i_left, i_right) = self.surrounding_origins(x)
-        t_left = self.delay[i_left] + self.G(x, self.origins[i_left], tensor([+1.0])) / self.v0
-        t_right = self.delay[i_right] + self.G(x, self.origins[i_right], tensor([-1.0])) / self.v0
+        t_left = self.delay[i_left] + self.G(x, self.origins[i_left], dtensor([+1.0])) / self.v0
+        t_right = self.delay[i_right] + self.G(x, self.origins[i_right], dtensor([-1.0])) / self.v0
         return minimum(t_left, t_right)
 
     def P(self, x: Tensor) -> Tensor:
@@ -172,17 +181,16 @@ class VelocityModel(nn.Module):
         return exp(- self.growthrate * self.Hinv(self.T(x)))
 
     def forward(self, x: Tensor):
-        P(x)
-        pass
+        return self.P(x)
 
     def h_cov(self) -> Tensor:
-        return self.h_sigma2 * exp(- (self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2 / (2 * self.h_lengthscale))
+        return (self.h_sigma ** 2) * exp(- (self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2 / (2 * self.h_lengthscale))
 
     def h_cov_inv(self) -> Tensor:
         return cholesky_inverse(self.h_cov())
 
     def penalty(self):
-        0.5 * matmul(self.h_log[None, :], matmul(self.h_cov_inv(), self.h_log))
+        return 0.5 * matmul(self.h_log[None, :], matmul(self.h_cov_inv(), self.h_log))
 
 class VelocityModelLoss(nn.Module):
     def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel):
@@ -200,7 +208,7 @@ class VelocityModelLoss(nn.Module):
 
     def forward(self) -> Tensor:
         y_pred = self.model.forward(self.x)
-        scale = self.y_obs_means * mean(y_pred)
+        scale = self.y_obs_mean / mean(y_pred)
         assert scale.dim() == self.y_obs.dim()
         assert scale.size()[0] == 1
         return (0.5 * sum(self.weights * ((self.y_obs - scale * y_pred) ** 2)) + self.model.penalty())
