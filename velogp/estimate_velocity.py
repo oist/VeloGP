@@ -9,14 +9,20 @@ class FitModel:
         self.model = model
         self.loss = loss
 
-    def optimize(self, iterations: int):
-        self.optimizer = optim.SGD(self.model.parameters())
-
-        for i in range(0, iterations):
-            # Compute loss
+    def optimize(self):
+        self.optimizer = optim.LBFGS(self.model.parameters())
+        def s():
             l = self.loss()
-            # backward pass
             self.optimizer.zero_grad()
-            l.backward(retain_graph=True)
-            # update weights
-            self.optimizer.step()
+            l.backward()
+            return l
+        self.optimizer.step(s)
+
+#        for i in range(0, iterations):
+#            # Compute loss
+#            l = self.loss()
+#            # backward pass
+#            self.optimizer.zero_grad()
+#            l.backward(retain_graph=True)
+#            # update weights
+#            self.optimizer.step()
