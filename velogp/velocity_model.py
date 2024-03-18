@@ -22,7 +22,7 @@ class VelocityModel(nn.Module):
             # Baseline velocity
             self.v0 = nn.Parameter(dtensor([100.0]))
             # Gaussian process hyperparameters
-            self.h_lengthscale = tensor([1e4], requires_grad=False)
+            self.h_timescale = tensor([1e4], requires_grad=False)
             self.h_sigma = tensor([1.0], requires_grad=False)
             # Grid on which h(t) is defined as a piece-wise constant (right-continuous) function
             self.h_tgrid = h_tgrid
@@ -204,7 +204,8 @@ class VelocityModel(nn.Module):
         return self.P(x)
 
     def h_cov(self) -> Tensor:
-        return (self.h_sigma ** 2) * exp(- (self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2 / (2 * self.h_lengthscale))
+        return (self.h_sigma ** 2) * exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) /
+                                         (2 * (self.h_timescale ** 2)))
 
     def h_cov_inv(self) -> Tensor:
         return cholesky_inverse(self.h_cov())
