@@ -12,12 +12,10 @@ class FitVelocityModel:
 
     def loss_function(self, optimizer):
         def s():
-            print(self.model.delay)
             self.model.clamp_parameters()
-            l = self.loss()
             optimizer.zero_grad()
+            l = self.loss()
             l.backward()
-            print(self.model.delay.grad)
             return l
         return s
 
@@ -32,4 +30,3 @@ class FitVelocityModel:
         optimize_params = optim.LBFGS([self.model.v0, self.model.delay, self.model.h_log, self.model.g_log],
                                       max_iter=100, line_search_fn="strong_wolfe")
         optimize_params.step(self.loss_function(optimize_params))
-        return self.model
