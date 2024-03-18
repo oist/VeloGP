@@ -23,7 +23,7 @@ class VelocityModel(nn.Module):
             # Baseline velocity
             self.v0 = dtensor([100.0])
             # Gaussian process hyperparameters
-            self.h_timescale = tensor([1e4], requires_grad=False)
+            self.h_timescale = tensor([1e2], requires_grad=False)
             self.h_sigma = tensor([1.0], requires_grad=False)
             # Grid on which h(t) is defined as a piece-wise constant (right-continuous) function
             self.h_tgrid = h_tgrid
