@@ -77,7 +77,10 @@ class VelocityModel(nn.Module):
         # updates are forbidding while auto-grad is active, but that's OK, this
         # function should be called *before* the model is evaluated.
         with no_grad():
+            self.v0.clamp_(0.0, math.inf)
             self.delay.clamp_(0.0, math.inf)
+            self.h_timescale.clamp_(0.0, math.inf)
+            self.h_sigma.clamp_(0.0, math.inf)
         pass
 
     def H(self, t: Tensor) -> Tensor:
