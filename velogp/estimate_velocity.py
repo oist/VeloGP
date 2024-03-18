@@ -10,7 +10,7 @@ class FitModel:
         self.loss = loss
 
     def optimize(self):
-        self.optimizer = optim.LBFGS(self.model.parameters())
+        self.optimizer = optim.LBFGS(self.model.parameters(), max_iter=50)
         def s():
             l = self.loss()
             self.optimizer.zero_grad()
