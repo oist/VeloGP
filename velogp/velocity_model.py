@@ -70,14 +70,15 @@ class VelocityModel(nn.Module):
             self.g_xgrid_len.requires_grad = False
             self.g_log = zeros(self.g_xranges_l.size(), dtype=torch.double)
 
-    def clamp_parameter(self, n: str, min: float, max: float):
-        with no_grad():
-            v = getattr(self, n)
-            vp = v #maximum(dtensor([min]), minimum(v, dtensor([max])))
-        setattr(self, n, nn.Parameter(vp) if isinstance(v, nn.Parameter) else vp)
 
     def clamp_parameters(self):
-        self.clamp_parameter("delay", 0.0, math.inf)
+        # We must update parameters in-place since optimizes identify parameters
+        # by the *identity* of the corresponding nn.Parameter object. In-place
+        # updates are forbidding while auto-grad is active, but that's OK, this
+        # function should be called *before* the model is evaluated.
+        with no_grad():
+            self.delay.clamp_(0.0, math.inf)
+        pass
 
     def H(self, t: Tensor) -> Tensor:
         """Evaluates H(t) = int_0^t h(u) du at the specified points t
