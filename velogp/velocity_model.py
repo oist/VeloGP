@@ -1,4 +1,5 @@
 from typing import Any, Dict, Optional, Union, Tuple
+import math
 import torch
 from torch import nn
 from torch import *
@@ -20,7 +21,7 @@ class VelocityModel(nn.Module):
             # Growth rate
             self.growthrate = dtensor([1/3600], requires_grad=False)
             # Baseline velocity
-            self.v0 = nn.Parameter(dtensor([100.0]))
+            self.v0 = dtensor([100.0])
             # Gaussian process hyperparameters
             self.h_timescale = tensor([1e4], requires_grad=False)
             self.h_sigma = tensor([1.0], requires_grad=False)
@@ -33,7 +34,7 @@ class VelocityModel(nn.Module):
             assert all(self.h_tgrid < cat((self.h_tgrid[1:], dtensor([float('inf')])))).detach().item()
             self.h_tgrid_len = cat((self.h_tgrid[1:], dtensor([float('inf')]))) - self.h_tgrid
             self.h_tgrid_len.requires_grad = False
-            self.h_log = nn.Parameter(zeros(h_tgrid.size(), dtype=torch.double))
+            self.h_log = zeros(h_tgrid.size(), dtype=torch.double)
             # Origins of replication
             self.origins = origins
             self.origins.requires_grad = False
@@ -49,7 +50,7 @@ class VelocityModel(nn.Module):
                 self.origins_augmented = self.origins
                 self.origins_augmented.requires_grad = False
             # Replication delayys
-            self.delay = nn.Parameter(zeros_like(self.origins, dtype=torch.double))
+            self.delay = zeros_like(self.origins, dtype=torch.double)
             # Intervals on which g(x) differs from 1.0
             self.g_xranges_l = g_xranges_l
             self.g_xranges_u = g_xranges_u
@@ -67,7 +68,16 @@ class VelocityModel(nn.Module):
             self.g_xgrid.requires_grad = False
             self.g_xgrid_len = cat((self.g_xgrid[1:], dtensor([genome_length]))) - self.g_xgrid
             self.g_xgrid_len.requires_grad = False
-            self.g_log = nn.Parameter(zeros(self.g_xranges_l.size(), dtype=torch.double))
+            self.g_log = zeros(self.g_xranges_l.size(), dtype=torch.double)
+
+    def clamp_parameter(self, n: str, min: float, max: float):
+        with no_grad():
+            v = getattr(self, n)
+            vp = v #maximum(dtensor([min]), minimum(v, dtensor([max])))
+        setattr(self, n, nn.Parameter(vp) if isinstance(v, nn.Parameter) else vp)
+
+    def clamp_parameters(self):
+        self.clamp_parameter("delay", 0.0, math.inf)
 
     def H(self, t: Tensor) -> Tensor:
         """Evaluates H(t) = int_0^t h(u) du at the specified points t
