@@ -238,8 +238,9 @@ class VelocityModelLoss(nn.Module):
         assert self.y_obs.dim() in [1, 2]
         assert self.y_obs.size()[0] == self.x.size()[0]
         assert self.s_obs.size() == self.y_obs.size()
-        self.y_obs_mean = mean(self.y_obs, dim=0, keepdim=True)
-        self.weights = tensor([1.0]) / (self.s_obs ** 2)
+        with no_grad():
+            self.y_obs_mean = mean(self.y_obs, dim=0, keepdim=True)
+            self.weights = tensor([1.0]) / (self.s_obs ** 2)
 
     def forward(self) -> Tensor:
         y_pred = self.model.forward(self.x)
