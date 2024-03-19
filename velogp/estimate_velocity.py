@@ -12,7 +12,9 @@ class FitVelocityModel:
 
     def loss_function(self, optimizer):
         def s():
+            # Clamp parameters to their domain before each iteration
             self.model.clamp_parameters()
+            # Evaluate loss and gradients
             optimizer.zero_grad()
             l = self.loss()
             l.backward()
@@ -20,13 +22,21 @@ class FitVelocityModel:
         return s
 
     def optimize(self):
+        self.model.h_switch_basis("eigenbasis")
+        # First, optimize v0 and origin delays only
         self.model.v0 = nn.Parameter(self.model.v0)
         self.model.delay = nn.Parameter(self.model.delay)
         optimize_v0_delay = optim.LBFGS([self.model.v0, self.model.delay],
                                         max_iter=500, line_search_fn="strong_wolfe")
         optimize_v0_delay.step(self.loss_function(optimize_v0_delay))
-        self.model.h_log = nn.Parameter(self.model.h_log)
+        # Make sure the final values lie within the parameter's domains
+        self.model.clamp_parameters()
+        # Now, also optimize h() and g()
+        self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
         self.model.g_log = nn.Parameter(self.model.g_log)
-        optimize_params = optim.LBFGS([self.model.v0, self.model.delay, self.model.h_log, self.model.g_log],
+        optimize_params = optim.LBFGS([self.model.v0, self.model.delay, self.model.h_log_raw, self.model.g_log],
                                       max_iter=500, line_search_fn="strong_wolfe")
         optimize_params.step(self.loss_function(optimize_params))
+        # Make sure the final values lie within the parameter's domains
+        self.model.clamp_parameters()
+        #self.model.h_switch_basis("canonical")

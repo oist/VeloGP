@@ -1,7 +1,8 @@
 from typing import Any, Dict, Optional, Union, Tuple
+from collections import namedtuple
 import math
 import torch
-from torch import nn
+from torch import nn, linalg
 from torch import *
 from builtins import float, int
 
@@ -11,6 +12,10 @@ def dtensor(v, **kw_args) -> DoubleTensor:
 class VelocityModel(nn.Module):
     int32_min : int = -2**31
     int32_max : int = 2**31 - 1
+
+    H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-3
+
+    Eigenbasis = namedtuple("Eigenbasis", ["eigenvalues", "eigenvectors"])
 
     def __init__(self, genome_length: int, is_circular: bool, origins: IntTensor, h_tgrid: DoubleTensor, g_xranges_l: IntTensor, g_xranges_u: IntTensor):
         super().__init__()
@@ -34,7 +39,11 @@ class VelocityModel(nn.Module):
             assert all(self.h_tgrid < cat((self.h_tgrid[1:], dtensor([float('inf')])))).detach().item()
             self.h_tgrid_len = cat((self.h_tgrid[1:], dtensor([float('inf')]))) - self.h_tgrid
             self.h_tgrid_len.requires_grad = False
-            self.h_log = zeros(h_tgrid.size(), dtype=torch.double)
+            self.h_log_raw = zeros(h_tgrid.size(), dtype=torch.double)
+            self.h_basis = "canonical"
+            # Eigenbasis of the covariance matrix of H, see update_h_cov_eig()
+            self.h_cov_eig = None
+            self.h_cov_eig_timescale = None
             # Origins of replication
             self.origins = origins
             self.origins.requires_grad = False
@@ -70,7 +79,6 @@ class VelocityModel(nn.Module):
             self.g_xgrid_len.requires_grad = False
             self.g_log = zeros(self.g_xranges_l.size(), dtype=torch.double)
 
-
     def clamp_parameters(self):
         # We must update parameters in-place since optimizes identify parameters
         # by the *identity* of the corresponding nn.Parameter object. In-place
@@ -81,7 +89,6 @@ class VelocityModel(nn.Module):
             self.delay.clamp_(0.0, math.inf)
             self.h_timescale.clamp_(0.0, math.inf)
             self.h_sigma.clamp_(0.0, math.inf)
-        pass
 
     def H(self, t: Tensor) -> Tensor:
         """Evaluates H(t) = int_0^t h(u) du at the specified points t
@@ -100,7 +107,7 @@ class VelocityModel(nn.Module):
             # Tensor containing the length of the intersection of [0, t[j]] and [h_tgrid[i], h_tgrid[i+1]]
             c = maximum(zeros, minimum(dist, length))
         # H(t[j]) = sum_i h[i] * c[i,j]
-        return sum(c * exp(self.h_log[(...,) + (None,) * t.dim()]), dim=0)
+        return sum(c * exp(self.h_log()[(...,) + (None,) * t.dim()]), dim=0)
 
     def Hinv(self, u: Tensor) -> Tensor:
         """Evaluates H^-1(u) at the specified points u
@@ -115,7 +122,8 @@ class VelocityModel(nn.Module):
         #       using the full h_tgrid and h_log vectors would also achieve that. This involves a
         #       multiplication of the form c * inf, however, which the back-propagation code cannot
         #       handle correctly.
-        H_tgrid = cat((dtensor([0.0]), torch.cumsum(self.h_tgrid_len[:-1] * exp(self.h_log[:-1]), dim=0),
+        h_log = self.h_log("canonical")
+        H_tgrid = cat((dtensor([0.0]), torch.cumsum(self.h_tgrid_len[:-1] * exp(h_log[:-1]), dim=0),
                        dtensor([float('inf')])))
         # Find t_i where H(t_i) <= u but H(t_(i+1)) > u
         with no_grad():
@@ -125,7 +133,7 @@ class VelocityModel(nn.Module):
         #   H(t) = H(t_i) + (t - t_i) * exp(h[i])
         # and its inverse is thus
         #   H^-1(u) = t_i + (u - H(t_i)) / exp(h[i])
-        return self.h_tgrid[idx] + (u - H_tgrid[idx]) / exp(self.h_log[idx])
+        return self.h_tgrid[idx] + (u - H_tgrid[idx]) / exp(h_log[idx])
 
     def G_0(self, x: Tensor) -> Tensor:
         """
@@ -217,15 +225,67 @@ class VelocityModel(nn.Module):
     def forward(self, x: Tensor):
         return self.P(x)
 
-    def h_cov(self) -> Tensor:
-        return (self.h_sigma ** 2) * exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) /
-                                         (2 * (self.h_timescale ** 2)))
+    def h_switch_basis(self, newbasis):
+        with no_grad():
+            self.h_log_raw = self.h_log(newbasis)
+        self.h_basis = newbasis
+
+    def h_log(self, basis):
+        if (self.h_basis == "canonical") and (basis == "eigenbasis"):
+            return matmul(self.h_log_raw, self.h_eigenbasis())
+        elif (self.h_basis == "eigenbasis") and (basis == "canonical"):
+            return matmul(self.h_eigenbasis(), self.h_log_raw)
+        elif self.h_basis == basis:
+            return self.h_log_raw
+        else:
+            raise ValueError("invalid basis " + self.h_basis + " or " + basis)
+
+    def h_cov(self, sigma_one=False) -> Tensor:
+        s = exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2)))
+        return (self.h_sigma ** 2) * s if not sigma_one else s
+
+    def update_h_cov_eig(self):
+        with no_grad():
+            if (self.h_cov_eig is None) or (self.h_cov_eig_timescale != self.h_timescale):
+                # Changing the time-scale changes the eigenbasis, so to keep h_log the same
+                # in the canonical basis (which is the representation we ultimately care about)
+                # we switch to the canonical basis before changing h_cov_eig.
+                basis = self.h_basis
+                self.h_switch_basis("canonical")
+                # Find eigenvalues and eigenvectors of the symmetric matrix h_cov(). We don't
+                # include the pre-factor h_sigma^2 here, this avoids having to recompute things
+                # if the prefactor changes.
+                e = linalg.eigh(self.h_cov(sigma_one=True))
+                # Remove components that correspond to eigenvectors less than some threshold.
+                # This essentially removes components for which even small changes would have
+                # very drastic effects on the prior likelihood, which poses a challange for
+                # the optimizer.
+                i = argmax((e.eigenvalues > dtensor([self.H_EIGENFUNCTION_VARIANCE_THRESHOLD])).view(torch.int8))
+                self.h_cov_eig = self.Eigenbasis(e.eigenvalues[i:], e.eigenvectors[:, i:])
+                self.h_cov_eig_timescale = self.h_timescale
+                # Switch back to the original basis
+                self.h_switch_basis(basis)
+
+    def h_eigenbasis(self):
+        self.update_h_cov_eig()
+        return self.h_cov_eig.eigenvectors
+
+    def h_eigenvalues(self):
+        self.update_h_cov_eig()
+        return self.h_cov_eig.eigenvalues
 
     def h_cov_inv(self) -> Tensor:
         return cholesky_inverse(self.h_cov())
 
     def penalty(self):
-        return 0.5 * matmul(self.h_log[None, :], matmul(self.h_cov_inv(), self.h_log))
+        return 0.5 * sum((self.h_log("eigenbasis") ** 2) / self.h_eigenvalues())
+        #return 0.5 * matmul(self.h_log[None, :], matmul(self.h_cov_inv(), self.h_log))
+        # We have to compute z = h ^ T * Sigma_h^-1 * h. We first find b such that
+        #   b = Sigma_h^-1 * h
+        # by solving Sigma_h * b = h, and then compute z as
+        #   x = h ^ T * b
+        #b = torch.linalg.solve(self.h_cov(), self.h_log)
+        #return 0.5 * dot(self.h_log, b)
 
 class VelocityModelLoss(nn.Module):
     def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel):
