@@ -90,6 +90,44 @@ class VelocityModel(nn.Module):
             self.h_timescale.clamp_(0.0, math.inf)
             self.h_sigma.clamp_(0.0, math.inf)
 
+    def normalize_parameters(self):
+        with no_grad():
+            # The delay parameter actually only has k-1 degrees of freedom,
+            # where k is the number of origins. Actually parameterizing with
+            # k-1 parameters, however, is difficult without either breaking
+            # symmetry or interfering with gradient descent. We therefore
+            # enforce the constraint that one delay must be here, which takes
+            # effect *after* the optimizer has finished.
+            self.delay.sub_(min(self.delay))
+
+    def v_t(self, t: Tensor) -> Tensor:
+        """Evaluates v_t(t) = v0 * h(t) at the specified points t
+
+        :param t: Times t as a tensor of arbitrary shape
+        :return: v_t(t) as a tensor of the same shape as t
+        """
+        return self.v0 * self.h(t)
+
+    def h(self, t: Tensor) -> Tensor:
+        """Evaluates h(t) at the specified points t
+
+        h(t) is right-continuous and piece-wise constant on the (fixed) grid h_tgrid and obeys h(h_tgrid[i]) = h[i].
+
+        :param t: Times t as a tensor of arbitrary shape
+        :return: h(t) as a tensor of the same shape as t
+        """
+        assert all(t >= self.h_tgrid[0])
+        # Compute H(t) on the (fixed) grid h_tgrid (we could call H here, but this is faster)
+        # NOTE: We required h_tgrid to contain +inf in its last element, since that guarantees that
+        #       the lookup below always finds at least one grid cell where u < H.
+        h_tgrid_augmented = cat((self.h_tgrid, dtensor([float('inf')])))
+        # Find i where h_tgrid[i] <= u but h_tgrid[i+1] > u
+        with no_grad():
+            lt = t[None, ...] < h_tgrid_augmented[(...,) + (None,) * t.dim()]
+            idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
+        h = exp(self.h_log("canonical"))
+        return h[idx]
+
     def H(self, t: Tensor) -> Tensor:
         """Evaluates H(t) = int_0^t h(u) du at the specified points t
 
@@ -117,23 +155,23 @@ class VelocityModel(nn.Module):
         """
         assert all(u >= self.h_tgrid[0])
         # Compute H(t) on the (fixed) grid h_tgrid (we could call H here, but this is faster)
-        # NOTE: We required H_tgrid to contain +inf in its last element, since that guarantees that
+        # NOTE: We required H to contain +inf in its last element, since that guarantees that
         #       the lookup below always finds at least one grid cell where u < H. In principle, simply
-        #       using the full h_tgrid and h_log vectors would also achieve that. This involves a
+        #       using the full h_tgrid_len and h_log vectors would also achieve that. This involves a
         #       multiplication of the form c * inf, however, which the back-propagation code cannot
         #       handle correctly.
         h_log = self.h_log("canonical")
-        H_tgrid = cat((dtensor([0.0]), torch.cumsum(self.h_tgrid_len[:-1] * exp(h_log[:-1]), dim=0),
-                       dtensor([float('inf')])))
+        H = cat((dtensor([0.0]), torch.cumsum(self.h_tgrid_len[:-1] * exp(h_log[:-1]), dim=0),
+                 dtensor([float('inf')])))
         # Find t_i where H(t_i) <= u but H(t_(i+1)) > u
         with no_grad():
-            lt = u[None, ...] < H_tgrid[(...,) + (None,) * u.dim()]
+            lt = u[None, ...] < H[(...,) + (None,) * u.dim()]
             idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
         # Within [t_i, t_(i+1)] the function H is piece-wise linear, i.e.
         #   H(t) = H(t_i) + (t - t_i) * exp(h[i])
         # and its inverse is thus
         #   H^-1(u) = t_i + (u - H(t_i)) / exp(h[i])
-        return self.h_tgrid[idx] + (u - H_tgrid[idx]) / exp(h_log[idx])
+        return self.h_tgrid[idx] + (u - H[idx]) / exp(h_log[idx])
 
     def G_0(self, x: Tensor) -> Tensor:
         """
@@ -225,12 +263,34 @@ class VelocityModel(nn.Module):
     def forward(self, x: Tensor):
         return self.P(x)
 
-    def h_switch_basis(self, newbasis):
+    def h_switch_basis(self, newbasis: str):
+        """Switch the basis in which h_log is represented
+
+        The represented h_log stays the same, i.e. h_log("canonical") does not change
+        (except for numerical errors). The possible bases are
+
+        (1) 'canonical'. log(h(t)) is represented by the vector log(h(h_tgrid[1])), ..., log(h(h_tgrid[k]))
+
+        (2) 'eigenbasis'. log(h(t)) is represented by the vector [c1, ..., ck] such that
+        sum_i c[i] * v[i] = is log(h(h_tgrid[1])), ..., log(h(h_tgrid[kp])) where v[i] are the eigenvectors of
+        the covariance matrix of log(h(h_tgrid[1])), ..., log(h(h_tgrid[k])). Eigenvectors whose eigenvalue is
+        negative (due to rounding errors) or less than H_EIGENFUNCTION_VARIANCE_THRESHOLD are ignored, in that
+        case kp < k.
+
+        :param newbasis: The basis to switch to ('canonical' or 'eigenbasis')
+        """
         with no_grad():
             self.h_log_raw = self.h_log(newbasis)
         self.h_basis = newbasis
 
-    def h_log(self, basis):
+    def h_log(self, basis: str):
+        """Returns the vector log(h(h_tgrid)) in the requested basis.
+
+        See `h_switch_basis` for a discussion of the possible bases.
+
+        :param basis: The basis to return log(h(h_tgrid)) in, either 'canonical' or 'eigenbasis'
+        :return: The vector log(h(h_tgrid)) in the specified basis
+        """
         if (self.h_basis == "canonical") and (basis == "eigenbasis"):
             return matmul(self.h_log_raw, self.h_eigenbasis())
         elif (self.h_basis == "eigenbasis") and (basis == "canonical"):
@@ -240,9 +300,14 @@ class VelocityModel(nn.Module):
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + basis)
 
-    def h_cov(self, sigma_one=False) -> Tensor:
+    def h_cov(self, include_sigma=True) -> Tensor:
+        """The covariance matrix of log(h(h_tgrid[1])), ..., log(h(h_tgrid[k]))
+
+        :param  sigma_one: Don't include the pre-factor h_sigma ** 2
+        :return: the covariance matrix
+        """
         s = exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2)))
-        return (self.h_sigma ** 2) * s if not sigma_one else s
+        return (self.h_sigma ** 2) * s if include_sigma else s
 
     def update_h_cov_eig(self):
         with no_grad():
@@ -255,10 +320,10 @@ class VelocityModel(nn.Module):
                 # Find eigenvalues and eigenvectors of the symmetric matrix h_cov(). We don't
                 # include the pre-factor h_sigma^2 here, this avoids having to recompute things
                 # if the prefactor changes.
-                e = linalg.eigh(self.h_cov(sigma_one=True))
+                e = linalg.eigh(self.h_cov(include_sigma=False))
                 # Remove components that correspond to eigenvectors less than some threshold.
                 # This essentially removes components for which even small changes would have
-                # very drastic effects on the prior likelihood, which poses a challange for
+                # very drastic effects on the prior likelihood, which poses a challenge for
                 # the optimizer.
                 i = argmax((e.eigenvalues > dtensor([self.H_EIGENFUNCTION_VARIANCE_THRESHOLD])).view(torch.int8))
                 self.h_cov_eig = self.Eigenbasis(e.eigenvalues[i:], e.eigenvectors[:, i:])
@@ -274,18 +339,26 @@ class VelocityModel(nn.Module):
         self.update_h_cov_eig()
         return self.h_cov_eig.eigenvalues
 
-    def h_cov_inv(self) -> Tensor:
-        return cholesky_inverse(self.h_cov())
+    def prior_hlog(self):
+        # In the eigenbasis, the covariance matrix diagonalizes, so we just sum the squared entries of h_log
+        # (since the expected value is zero) scaled by the diagonal element (the eigenvector). Have to manually
+        # add the h_sigma pre-factor since we left that out when computing the covariance matrix.
+        return 0.5 * sum((self.h_log("eigenbasis") ** 2) / ((self.h_sigma ** 2) * self.h_eigenvalues()))
 
-    def penalty(self):
-        return 0.5 * sum((self.h_log("eigenbasis") ** 2) / self.h_eigenvalues())
-        #return 0.5 * matmul(self.h_log[None, :], matmul(self.h_cov_inv(), self.h_log))
-        # We have to compute z = h ^ T * Sigma_h^-1 * h. We first find b such that
-        #   b = Sigma_h^-1 * h
-        # by solving Sigma_h * b = h, and then compute z as
-        #   x = h ^ T * b
-        #b = torch.linalg.solve(self.h_cov(), self.h_log)
-        #return 0.5 * dot(self.h_log, b)
+    def sample_hlog(self, basis : str, sample_shape : torch.Size = torch.Size([1])):
+        self.update_h_cov_eig()
+        # Generate as many standard-normal random variables for each sample as the covariance matrix of h
+        # has eigenvectors that are significantly larger than zero.
+        shape = (self.h_cov_eig.eigenvalues.size()[0],) + sample_shape
+        z = torch.distributions.normal.Normal(dtensor([0.0]), dtensor([1.0])).rsample(shape)
+        # Generate random h_log in the eigenbasis representation
+        z = z * (self.h_sigma ** 2) * self.h_cov_eig.eigenvalues[:, (None,) * len(sample_shape)]
+        if basis == "canonical":
+            return matmul(self.h_eigenbasis(), z)
+        elif basis == "eigenbasis":
+            return z
+        else:
+            raise ValueError("Invalid basis " + basis)
 
 class VelocityModelLoss(nn.Module):
     def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel):
@@ -302,9 +375,12 @@ class VelocityModelLoss(nn.Module):
             self.y_obs_mean = mean(self.y_obs, dim=0, keepdim=True)
             self.weights = tensor([1.0]) / (self.s_obs ** 2)
 
-    def forward(self) -> Tensor:
+    def y_pred(self) -> Tensor:
         y_pred = self.model.forward(self.x)
         scale = self.y_obs_mean / mean(y_pred)
         assert scale.dim() == self.y_obs.dim()
         assert scale.size()[0] == 1
-        return (0.5 * sum(self.weights * ((self.y_obs - scale * y_pred) ** 2)) + self.model.penalty())
+        return scale * y_pred
+
+    def forward(self) -> Tensor:
+        return 0.5 * sum(self.weights * ((self.y_obs - self.y_pred()) ** 2))
