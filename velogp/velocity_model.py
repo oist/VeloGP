@@ -15,7 +15,7 @@ class VelocityModel(nn.Module):
 
     H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-3
 
-    Eigenbasis = namedtuple("Eigenbasis", ["eigenvalues", "eigenvectors"])
+    Eigenbasis = namedtuple("Eigenbasis", ["eigenvalues", "eigenvectors", "k"])
 
     def __init__(self, genome_length: int, is_circular: bool, origins: IntTensor, h_tgrid: DoubleTensor, g_xranges_l: IntTensor, g_xranges_u: IntTensor):
         super().__init__()
@@ -279,9 +279,10 @@ class VelocityModel(nn.Module):
 
         :param newbasis: The basis to switch to ('canonical' or 'eigenbasis')
         """
-        with no_grad():
-            self.h_log_raw = self.h_log(newbasis)
-        self.h_basis = newbasis
+        if self.h_basis != newbasis:
+            with no_grad():
+                self.h_log_raw = self.h_log(newbasis)
+            self.h_basis = newbasis
 
     def h_log(self, basis: str):
         """Returns the vector log(h(h_tgrid)) in the requested basis.
@@ -300,50 +301,82 @@ class VelocityModel(nn.Module):
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + basis)
 
-    def h_cov(self, include_sigma=True) -> Tensor:
+    def h_cov(self, include_sigma) -> Tensor:
         """The covariance matrix of log(h(h_tgrid[1])), ..., log(h(h_tgrid[k]))
 
-        :param  sigma_one: Don't include the pre-factor h_sigma ** 2
+        :param  include_sigma: Whether to Don't include the pre-factor h_sigma ** 2
         :return: the covariance matrix
         """
         s = exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2)))
         return (self.h_sigma ** 2) * s if include_sigma else s
 
     def update_h_cov_eig(self):
-        with no_grad():
-            if (self.h_cov_eig is None) or (self.h_cov_eig_timescale != self.h_timescale):
-                # Changing the time-scale changes the eigenbasis, so to keep h_log the same
-                # in the canonical basis (which is the representation we ultimately care about)
-                # we switch to the canonical basis before changing h_cov_eig.
-                basis = self.h_basis
-                self.h_switch_basis("canonical")
-                # Find eigenvalues and eigenvectors of the symmetric matrix h_cov(). We don't
-                # include the pre-factor h_sigma^2 here, this avoids having to recompute things
-                # if the prefactor changes.
-                e = linalg.eigh(self.h_cov(include_sigma=False))
-                # Remove components that correspond to eigenvectors less than some threshold.
-                # This essentially removes components for which even small changes would have
-                # very drastic effects on the prior likelihood, which poses a challenge for
-                # the optimizer.
-                i = argmax((e.eigenvalues > dtensor([self.H_EIGENFUNCTION_VARIANCE_THRESHOLD])).view(torch.int8))
-                self.h_cov_eig = self.Eigenbasis(e.eigenvalues[i:], e.eigenvectors[:, i:])
-                self.h_cov_eig_timescale = self.h_timescale
-                # Switch back to the original basis
-                self.h_switch_basis(basis)
+        """Recompute the eigenvalues and eigenvectors of self.h_cov()"""
+        if (self.h_cov_eig is None) or (self.h_cov_eig_timescale != self.h_timescale):
+            # Changing the time-scale changes the eigenbasis, so to keep h_log the same
+            # in the canonical basis (which is the representation we ultimately care about)
+            # we switch to the canonical basis before changing h_cov_eig.
+            basis = self.h_basis
+            self.h_switch_basis("canonical")
+            # Find eigenvalues and eigenvectors of the symmetric matrix h_cov(). We don't
+            # include the pre-factor h_sigma^2 here, this avoids having to recompute things
+            # if the prefactor changes.
+            e = linalg.eigh(self.h_cov(include_sigma=False))
+            # Remove components that correspond to eigenvectors less than some threshold.
+            # This essentially removes components for which even small changes would have
+            # very drastic effects on the prior likelihood, which poses a challenge for
+            # the optimizer.
+            i = argmax((e.eigenvalues > dtensor([self.H_EIGENFUNCTION_VARIANCE_THRESHOLD])).view(torch.int8))
+            self.h_cov_eig = self.Eigenbasis(e.eigenvalues[i:], e.eigenvectors[:, i:], i)
+            self.h_cov_eig_timescale = self.h_timescale
+            # Update the non-h_log-dependent prefactor of the multivariate normal density of h_log
+            # We thus compute h_prior_prefactor = -log(sqrt[(2pi)^k * |Sigma|]) where
+            # k is the dimension of h_log and Sigma the covariance matrix. Since we have
+            # already computed the eigenbasis of Sigma (but without the pre-factor h_sigma!),
+            # we use that |Sigma| = h_sigma^(2k) * lambda_1 * ... * lambda_n where
+            # lambda_1, ..., lambda_n are the eigenvalues we computed above. We cannot, however,
+            # simply ignore eigenvalues less than H_EIGENFUNCTION_VARIANCE_THRESHOLD here, because
+            # that would lead to discontinuities if the number of these eigenvalues changes. We
+            # thus replace those eigenvalues by the threshold H_EIGENFUNCTION_VARIANCE_THRESHOLD,
+            # thus essentially bounding the eigenvalues from below.
+            self.h_prior_prefactor = (
+                dtensor([- 0.5 * math.log(2*math.pi) * len(self.h_tgrid)])
+                - log(self.h_sigma) * len(self.h_tgrid)
+                - 0.5 * sum(log(self.h_cov_eig.eigenvalues))
+                - 0.5 * log(dtensor([self.H_EIGENFUNCTION_VARIANCE_THRESHOLD])) * (len(self.h_tgrid) - self.h_cov_eig.k)
+            )
+            # Switch back to the original basis
+            self.h_switch_basis(basis)
 
     def h_eigenbasis(self):
+        """ The eigenvectors of self.h_cov() whose eigenvalues exceed H_EIGENFUNCTION_VARIANCE_THRESHOLD"""
         self.update_h_cov_eig()
         return self.h_cov_eig.eigenvectors
 
     def h_eigenvalues(self):
+        """ The eigenvalues of self.h_cov() that exceed H_EIGENFUNCTION_VARIANCE_THRESHOLD"""
         self.update_h_cov_eig()
         return self.h_cov_eig.eigenvalues
 
-    def prior_hlog(self):
+    def prior_hlog(self, hdependent_only):
+        """The prior log-probability of self.h_log as a realization of a Gaussian process
+
+        Returns the log of the probability (or, rather, density) of self.h_log as a sample of a multivariate
+        Gaussian distribution with mean zero and covariance matrix self.h_sigma^2 *  self.h_cov().
+
+        :param hdependent_only: Whether to return the full density, or only the h_log-dependent terms
+        """
         # In the eigenbasis, the covariance matrix diagonalizes, so we just sum the squared entries of h_log
         # (since the expected value is zero) scaled by the diagonal element (the eigenvector). Have to manually
         # add the h_sigma pre-factor since we left that out when computing the covariance matrix.
-        return 0.5 * sum((self.h_log("eigenbasis") ** 2) / ((self.h_sigma ** 2) * self.h_eigenvalues()))
+        # NOTE: The h_prior_prefactor also includes terms for those eigenvalues which were included
+        # from the Eigenbasis because they lie below the H_EIGENFUNCTION_VARIANCE_THRESHOLD. Here, we don't
+        # explicitly account for these components, which amounts to treating them as being zero (and thus
+        # they don't contribute to the squared-distance from the mean)
+        self.update_h_cov_eig()
+        r = self.h_prior_prefactor if not hdependent_only else 0
+        r -= 0.5 * sum((self.h_log("eigenbasis") ** 2) / ((self.h_sigma ** 2) * self.h_eigenvalues()))
+        return r
 
     def sample_hlog(self, basis : str, sample_shape : torch.Size = torch.Size([1])):
         self.update_h_cov_eig()

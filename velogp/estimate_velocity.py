@@ -15,8 +15,10 @@ class FitVelocityModel:
             # Clamp parameters to their domain before each iteration
             self.model.clamp_parameters()
             # Evaluate loss and gradients
+            with no_grad():
+                self.model.update_h_cov_eig()
             optimizer.zero_grad()
-            l = self.loss() + self.model.prior_hlog()
+            l = self.loss() - self.model.prior_hlog(hdependent_only=True)
             l.backward()
             return l
         return s
