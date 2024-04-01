@@ -17,6 +17,8 @@ class VelocityModel(nn.Module):
 
     Eigenbasis = namedtuple("Eigenbasis", ["eigenvalues", "eigenvectors", "k"])
 
+    X = namedtuple("X", ["x", "origin_index_left", "origin_index_right"])
+
     def __init__(self, genome_length: int, is_circular: bool, origins: IntTensor, h_tgrid: DoubleTensor, g_xranges_l: IntTensor, g_xranges_u: IntTensor):
         super().__init__()
         with no_grad():
@@ -237,30 +239,35 @@ class VelocityModel(nn.Module):
         # Return origin positions
         return l_idx, r_idx
 
-    def T(self, x: Tensor) -> Tensor:
+    def prepare_input(self, x: Tensor):
+        assert all((x >= tensor([0], dtype=torch.int32)) & (x <= tensor([self.genome_length], dtype=torch.int32)))
+        with no_grad():
+            (i_left, i_right) = self.surrounding_origins(x)
+        return VelocityModel.X(x, i_left, i_right)
+
+    def T(self, x: Tensor | X) -> Tensor:
         """Returns the virtual replication time T(x)
 
         T(x) = min { Delta_l + int_(o_l)^x g(u)/v0 du, Delta_r + int_x^(o_r) g(u)/v0 du }, which is the virtual time
         at which the location x, surrounded by origins o_l on the left and o_r on the right is replicated. Delta_l,
         Delta_r are the delays with which these origins fire.
 
-        :param x: Genomic locations as a tensor of arbitrary shape
+        :param x: Genomic locations as a tensor of arbitrary shape or as a prepapred input returned by self.prepare_input
         :return: Virtual replication times as a tensor of the same shape
         """
-        with no_grad():
-            (i_left, i_right) = self.surrounding_origins(x)
-        t_left = self.delay[i_left] + self.G(x, self.origins[i_left], dtensor([+1.0])) / self.v0
-        t_right = self.delay[i_right] + self.G(x, self.origins[i_right], dtensor([-1.0])) / self.v0
+        x_prep = x if isinstance(x, VelocityModel.X) else self.prepare_input(x)
+        t_left = self.delay[x_prep.origin_index_left] + self.G(x_prep.x, self.origins[x_prep.origin_index_left], dtensor([+1.0])) / self.v0
+        t_right = self.delay[x_prep.origin_index_right] + self.G(x_prep.x, self.origins[x_prep.origin_index_right], dtensor([-1.0])) / self.v0
         return minimum(t_left, t_right)
 
-    def P(self, x: Tensor) -> Tensor:
+    def P(self, x: Tensor | X) -> Tensor:
         """Returns the predicted DNA abundance P(x)
-        :param x: Genomic locations as a tensor of arbitrary shape
+        :param x: Genomic locations as a tensor of arbitrary shape or as a prepapred input returned by self.prepare_input
         :return: Predicted DNA abundance
         """
         return exp(- self.growthrate * self.Hinv(self.T(x)))
 
-    def forward(self, x: Tensor):
+    def forward(self, x: Tensor | X):
         return self.P(x)
 
     def h_switch_basis(self, newbasis: str):
@@ -398,9 +405,13 @@ class VelocityModelLoss(nn.Module):
         super().__init__()
         self.model = model
         self.x = x
+        self.x.requires_grad = False
+        self.x_prep = self.model.prepare_input(self.x)
         assert self.x.dim() == 1
         self.y_obs = y_obs
+        self.y_obs.requires_grad = False
         self.s_obs = s_obs
+        self.s_obs.requires_grad = False
         assert self.y_obs.dim() in [1, 2]
         assert self.y_obs.size()[0] == self.x.size()[0]
         assert self.s_obs.size() == self.y_obs.size()
@@ -409,7 +420,7 @@ class VelocityModelLoss(nn.Module):
             self.weights = tensor([1.0]) / (self.s_obs ** 2)
 
     def y_pred(self) -> Tensor:
-        y_pred = self.model.forward(self.x)
+        y_pred = self.model.forward(self.x_prep)
         scale = self.y_obs_mean / mean(y_pred)
         assert scale.dim() == self.y_obs.dim()
         assert scale.size()[0] == 1
