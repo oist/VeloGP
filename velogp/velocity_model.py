@@ -91,6 +91,12 @@ class VelocityModel(nn.Module):
             self.delay.clamp_(0.0, math.inf)
             self.h_timescale.clamp_(0.0, math.inf)
             self.h_sigma.clamp_(0.0, math.inf)
+            if self.h_basis == "canonical":
+                h_log_raw_scale = 1
+            elif self.h_basis == "eigenbasis":
+                with no_grad():
+                    h_log_raw_scale = (self.h_sigma ** 2) * self.h_eigenvalues()
+            self.h_log_raw.clamp_(-5 * h_log_raw_scale, 5 * h_log_raw_scale)
 
     def normalize_parameters(self):
         with no_grad():
@@ -367,7 +373,7 @@ class VelocityModel(nn.Module):
         self.update_h_cov_eig()
         return self.h_cov_eig.eigenvalues
 
-    def prior_hlog(self, hdependent_only):
+    def prior_hlog(self, hyperparameter_dependence):
         """The prior log-probability of self.h_log as a realization of a Gaussian process
 
         Returns the log of the probability (or, rather, density) of self.h_log as a sample of a multivariate
@@ -383,7 +389,7 @@ class VelocityModel(nn.Module):
         # for these components, which amounts to treating them as being zero (and thus they don't contribute
         # to the squared-distance from the mean)
         self.update_h_cov_eig()
-        r = self.h_prior_prefactor if not hdependent_only else 0
+        r = self.h_prior_prefactor if hyperparameter_dependence else 0
         r -= 0.5 * sum((self.h_log("eigenbasis") ** 2) / ((self.h_sigma ** 2) * self.h_eigenvalues()))
         return r
 
@@ -401,6 +407,18 @@ class VelocityModel(nn.Module):
             return z
         else:
             raise ValueError("Invalid basis " + basis)
+
+    def prior(self, parameter, hyperparameter_dependence):
+        if parameter is self.v0:
+            return -log(self.v0)
+        elif parameter is self.delay:
+            return 0
+        elif parameter is self.h_log_raw:
+            return self.prior_hlog(hyperparameter_dependence=hyperparameter_dependence)
+        elif parameter is self.g_log:
+            return 0
+        else:
+            raise RuntimeError("no prior defined for this parameter")
 
 class VelocityModelLoss(nn.Module):
     def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel):
