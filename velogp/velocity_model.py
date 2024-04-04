@@ -17,7 +17,7 @@ class VelocityModel(nn.Module):
     int32_min : int = -2**31
     int32_max : int = 2**31 - 1
 
-    H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-3
+    H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-8
 
     Eigenbasis = namedtuple("Eigenbasis", ["eigenvalues", "eigenvectors", "k", "threshold"])
 
@@ -122,13 +122,13 @@ class VelocityModel(nn.Module):
 
     def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[int, int] = None) -> Tensor:
         if pmap is None:
-            h_log_raw_posterior_cov = posterior_cov
+            pc = posterior_cov
         else:
-            assert id(self.model.h_log_raw) in pmap
-            i, l = pmap[id(self.model.h_log_raw)], numel(self.model.h_log_raw)
-            h_log_raw_posterior_cov = posterior_cov[i:(i+l), i:(i+l)]
+            assert id(self.h_log_raw) in pmap
+            i, l = pmap[id(self.h_log_raw)], numel(self.h_log_raw)
+            pc = posterior_cov[i:(i+l), i:(i+l)]
 
-        return self.v0 * self.h_posterior_stderr(t, h_log_raw_posterior_cov)
+        return self.v0 * self.h_posterior_stderr(t, pc)
 
 
     def h_indices(self, t: Tensor) -> Tensor:
@@ -153,15 +153,17 @@ class VelocityModel(nn.Module):
         return exp(self.h_log("canonical")[self.h_indices(t)])
 
     def h_posterior_stderr(self, times: Tensor, h_log_raw_posterior_cov: Tensor) -> Tensor:
-        assert ((h_log_raw_posterior_cov.dim == 2) and
-                (h_log_raw_posterior_cov.size() == Size(self.h_log_raw.size()[0], self.h_log_raw.size()[0])))
+        assert ((h_log_raw_posterior_cov.dim() == 2) and
+                (h_log_raw_posterior_cov.size() == Size([self.h_log_raw.size()[0], self.h_log_raw.size()[0]])))
         idx = self.h_indices(times)
         if self.h_basis == "canonical":
-            return exp(self.h_log_raw[idx]) * diagonal(h_log_raw_posterior_cov)[idx]
+            d = sqrt(diagonal(h_log_raw_posterior_cov)[idx])
+            return exp(self.h_log_raw[idx]) * d
         elif self.h_basis == "eigenbasis":
-            return exp(self.h_log("canonical")[idx]) * diagonal(matmul(self.h_eigenbasis(),
-                                                                       matmul(h_log_raw_posterior_cov,
-                                                                               t(self.h_eigenbasis()))))[idx]
+            d = sqrt(diagonal(matmul(self.h_eigenbasis(),
+                                     matmul(h_log_raw_posterior_cov,
+                                            t(self.h_eigenbasis()))))[idx])
+            return exp(self.h_log("canonical")[idx]) * d
         else:
             raise ValueError("invalid basis " + self.h_basis)
 
@@ -367,7 +369,7 @@ class VelocityModel(nn.Module):
             s = cholesky_inverse(exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2))))
             return s / (self.h_sigma ** 2) if include_sigma else s
         elif self.h_basis == "eigenbasis":
-            s = diagflat(diagflat(dtensor([1.0]) / self.h_eigenvalues()))
+            s = diagflat(dtensor([1.0]) / self.h_eigenvalues())
             return s / (self.h_sigma ** 2) if include_sigma else s
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
@@ -490,7 +492,7 @@ class VelocityModelLoss(nn.Module):
             self.weights = tensor([1.0]) / (self.s_obs ** 2)
 
     def abundance_and_scale(self) -> Tuple[Tensor, Tensor]:
-        abd = self.model.forward(self.x_prep)
+        abd = self.model(self.x_prep)
         scale = self.y_obs_mean / mean(abd)
         assert scale.dim() == self.y_obs.dim()
         assert scale.size()[0] == 1
@@ -521,10 +523,10 @@ class VelocityModelLoss(nn.Module):
                 if p.grad is not None:
                     p.grad.zero_()
             # Evaluate model at position x_i and compute gradients
-            y_pred = scale * self.model.forward(self.x[k:k])
-            y_pred.backward(inputs=params)
+            y_pred = scale * self.model(self.x[k])
+            y_pred.backward(inputs=params, retain_graph=True)
             # Copy gradients into the k-th row of the jacobian
             for (ci, pi) in zip(c[:-1], params):
                 ni = numel(pi)
-                J[k, ci:(ci+ni)] = reshape(pi.grad, Size(ni))
-        return J, map
+                J[k, ci:(ci+ni)] = reshape(pi.grad, Size([ni]))
+        return J, pmap

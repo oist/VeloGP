@@ -31,9 +31,12 @@ class FitVelocityModel:
         # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
         u = einsum("ij,j,jk->ik", t(dM), self.loss.weights, dM)
         # Add Sigma_h^-1 for h_log_raw, which has a GP prior
-        if self.model.h_log_raw in params:
+        # We do this by querying the parameter map to find the
+        # sub-matrix of u that corresponds to the parameter h_log_raw,
+        # and adding the inverse of its prior covariance matrix
+        if id(self.model.h_log_raw) in pmap:
             i, l = pmap[id(self.model.h_log_raw)], numel(self.model.h_log_raw)
-            u[i:(i+l)] += self.model.h_cov_inv()
+            u[i:(i+l), i:(i+l)] += self.model.h_cov_inv()
         # The covariance matrix is the inverse of u
         return cholesky_inverse(u), pmap
 
