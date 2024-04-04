@@ -1,6 +1,10 @@
-from typing import Any, Dict, Optional, Union, Tuple
+import functools
+from typing import Any, Dict, Optional, Union, Tuple, List
 from collections import namedtuple
 import math
+import builtins
+
+import numpy as np
 import torch
 from torch import nn, linalg
 from torch import *
@@ -116,14 +120,18 @@ class VelocityModel(nn.Module):
         """
         return self.v0 * self.h(t)
 
-    def h(self, t: Tensor) -> Tensor:
-        """Evaluates h(t) at the specified points t
+    def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[int, int] = None) -> Tensor:
+        if pmap is None:
+            h_log_raw_posterior_cov = posterior_cov
+        else:
+            assert id(self.model.h_log_raw) in pmap
+            i, l = pmap[id(self.model.h_log_raw)], numel(self.model.h_log_raw)
+            h_log_raw_posterior_cov = posterior_cov[i:(i+l), i:(i+l)]
 
-        h(t) is right-continuous and piece-wise constant on the (fixed) grid h_tgrid and obeys h(h_tgrid[i]) = h[i].
+        return self.v0 * self.h_posterior_stderr(t, h_log_raw_posterior_cov)
 
-        :param t: Times t as a tensor of arbitrary shape
-        :return: h(t) as a tensor of the same shape as t
-        """
+
+    def h_indices(self, t: Tensor) -> Tensor:
         assert all(t >= self.h_tgrid[0])
         # Compute H(t) on the (fixed) grid h_tgrid (we could call H here, but this is faster)
         # NOTE: We required h_tgrid to contain +inf in its last element, since that guarantees that
@@ -132,9 +140,30 @@ class VelocityModel(nn.Module):
         # Find i where h_tgrid[i] <= u but h_tgrid[i+1] > u
         with no_grad():
             lt = t[None, ...] < h_tgrid_augmented[(...,) + (None,) * t.dim()]
-            idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
-        h = exp(self.h_log("canonical"))
-        return h[idx]
+            return argmax(lt.view(torch.int8), dim=0) - tensor([1])
+
+    def h(self, t: Tensor) -> Tensor:
+        """Evaluates h(t) at the specified points t
+
+        h(t) is right-continuous and piece-wise constant on the (fixed) grid h_tgrid and obeys h(h_tgrid[i]) = h[i].
+
+        :param t: Times t as a tensor of arbitrary shape
+        :return: h(t) as a tensor of the same shape as t
+        """
+        return exp(self.h_log("canonical")[self.h_indices(t)])
+
+    def h_posterior_stderr(self, times: Tensor, h_log_raw_posterior_cov: Tensor) -> Tensor:
+        assert ((h_log_raw_posterior_cov.dim == 2) and
+                (h_log_raw_posterior_cov.size() == Size(self.h_log_raw.size()[0], self.h_log_raw.size()[0])))
+        idx = self.h_indices(times)
+        if self.h_basis == "canonical":
+            return exp(self.h_log_raw[idx]) * diagonal(h_log_raw_posterior_cov)[idx]
+        elif self.h_basis == "eigenbasis":
+            return exp(self.h_log("canonical")[idx]) * diagonal(matmul(self.h_eigenbasis(),
+                                                                       matmul(h_log_raw_posterior_cov,
+                                                                               t(self.h_eigenbasis()))))[idx]
+        else:
+            raise ValueError("invalid basis " + self.h_basis)
 
     def H(self, t: Tensor) -> Tensor:
         """Evaluates H(t) = int_0^t h(u) du at the specified points t
@@ -313,14 +342,35 @@ class VelocityModel(nn.Module):
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + basis)
 
-    def h_cov(self, include_sigma) -> Tensor:
-        """The covariance matrix of log(h(h_tgrid[1])), ..., log(h(h_tgrid[k]))
+    def h_cov(self, include_sigma=True) -> Tensor:
+        """The covariance matrix of log(h(h_log_raw[1])), ..., log(h(h_log_raw[k]))
 
         :param  include_sigma: Whether to Don't include the pre-factor h_sigma ** 2
         :return: the covariance matrix
         """
-        s = exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2)))
-        return (self.h_sigma ** 2) * s if include_sigma else s
+        if self.h_basis == "canonical":
+            s = exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2)))
+            return (self.h_sigma ** 2) * s if include_sigma else s
+        elif self.h_basis == "eigenbasis":
+            s = diagflat(diagflat(self.h_eigenvalues()))
+            return (self.h_sigma ** 2) * s if include_sigma else s
+        else:
+            raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
+
+    def h_cov_inv(self, include_sigma=True) -> Tensor:
+        """The inverse of the covariance matrix of log(h(h_tgrid[1])), ..., log(h(h_tgrid[k]))
+
+        :param  include_sigma: Whether to Don't include the pre-factor 1 / h_sigma ** 2
+        :return: the covariance matrix
+        """
+        if self.h_basis == "canonical":
+            s = cholesky_inverse(exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2))))
+            return s / (self.h_sigma ** 2) if include_sigma else s
+        elif self.h_basis == "eigenbasis":
+            s = diagflat(diagflat(dtensor([1.0]) / self.h_eigenvalues()))
+            return s / (self.h_sigma ** 2) if include_sigma else s
+        else:
+            raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
 
     def update_h_cov_eig(self):
         """Recompute the eigenvalues and eigenvectors of self.h_cov()"""
@@ -439,12 +489,42 @@ class VelocityModelLoss(nn.Module):
             self.y_obs_mean = mean(self.y_obs, dim=0, keepdim=True)
             self.weights = tensor([1.0]) / (self.s_obs ** 2)
 
-    def y_pred(self) -> Tensor:
-        y_pred = self.model.forward(self.x_prep)
-        scale = self.y_obs_mean / mean(y_pred)
+    def abundance_and_scale(self) -> Tuple[Tensor, Tensor]:
+        abd = self.model.forward(self.x_prep)
+        scale = self.y_obs_mean / mean(abd)
         assert scale.dim() == self.y_obs.dim()
         assert scale.size()[0] == 1
-        return scale * y_pred
+        return (abd, scale)
+
+
+    def y_pred(self) -> Tensor:
+        abd, scale = self.abundance_and_scale()
+        return scale * abd
 
     def forward(self) -> Tensor:
         return 0.5 * sum(self.weights * ((self.y_obs - self.y_pred()) ** 2))
+
+    def jacobian(self, params: List[nn.Parameter]):
+        # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i of the
+        # jacobian, where n_i is the number of elements of the i-th parameter tensor
+        c = [0] + np.cumsum([ numel(p) for i, p in enumerate(params) ]).tolist()
+        pmap = { id(pi): ci for (ci, pi) in zip(c[:-1], params) }
+        # Evaluate model for all locations to find scaling factor
+        _, scale = self.abundance_and_scale()
+        # Prepare output matrix
+        n =  self.x.size()[0]
+        J = zeros(Size([n, c[-1]]), dtype=torch.float64)
+        # Evaluate at locations x_1,..., x_N individually to build jacobian
+        for k in builtins.range(0,n):
+            # Zero gradients
+            for p in params:
+                if p.grad is not None:
+                    p.grad.zero_()
+            # Evaluate model at position x_i and compute gradients
+            y_pred = scale * self.model.forward(self.x[k:k])
+            y_pred.backward(inputs=params)
+            # Copy gradients into the k-th row of the jacobian
+            for (ci, pi) in zip(c[:-1], params):
+                ni = numel(pi)
+                J[k, ci:(ci+ni)] = reshape(pi.grad, Size(ni))
+        return J, map

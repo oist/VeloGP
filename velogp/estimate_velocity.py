@@ -25,6 +25,18 @@ class FitVelocityModel:
             return l
         return s
 
+    def parameter_posterior_cov(self):
+        params = [self.model.v0, self.model.delay, self.model.h_log_raw]
+        dM, pmap = self.loss.jacobian(params)
+        # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
+        u = einsum("ij,j,jk->ik", t(dM), self.loss.weights, dM)
+        # Add Sigma_h^-1 for h_log_raw, which has a GP prior
+        if self.model.h_log_raw in params:
+            i, l = pmap[id(self.model.h_log_raw)], numel(self.model.h_log_raw)
+            u[i:(i+l)] += self.model.h_cov_inv()
+        # The covariance matrix is the inverse of u
+        return cholesky_inverse(u), pmap
+
     def h_sigma_lengthscale_loss_function(self, optimizer):
         def s():
             raise "Implement me"
