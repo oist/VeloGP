@@ -476,13 +476,13 @@ class VelocityModelLoss(nn.Module):
     def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel):
         super().__init__()
         self.model = model
-        self.x = x
+        self.x = dtensor(x)
         self.x.requires_grad = False
         self.x_prep = self.model.prepare_input(self.x)
         assert self.x.dim() == 1
-        self.y_obs = y_obs
+        self.y_obs = dtensor(y_obs)
         self.y_obs.requires_grad = False
-        self.s_obs = s_obs
+        self.s_obs = dtensor(s_obs)
         self.s_obs.requires_grad = False
         assert self.y_obs.dim() in [1, 2]
         assert self.y_obs.size()[0] == self.x.size()[0]
