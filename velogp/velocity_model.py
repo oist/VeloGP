@@ -462,7 +462,7 @@ class VelocityModel(nn.Module):
 
     def prior(self, parameter, hyperparameter_dependence):
         if parameter is self.v0:
-            return -log(self.v0)
+            return 0
         elif parameter is self.delay:
             return 0
         elif parameter is self.h_log_raw:
