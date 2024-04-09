@@ -1,4 +1,5 @@
 import functools
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Union, Tuple, List
 from collections import namedtuple
 import math
@@ -17,11 +18,20 @@ class VelocityModel(nn.Module):
     int32_min : int = -2**31
     int32_max : int = 2**31 - 1
 
-    H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-8
+    H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-12
 
-    Eigenbasis = namedtuple("Eigenbasis", ["eigenvalues", "eigenvectors", "k", "threshold"])
+    @dataclass
+    class Eigenbasis:
+        eigenvalues: Tensor
+        eigenvectors: Tensor
+        k: int
+        threshold: Tensor
 
-    X = namedtuple("X", ["x", "origin_index_left", "origin_index_right"])
+    @dataclass
+    class X:
+        x: Tensor
+        origin_index_left: Tensor
+        origin_index_right: Tensor
 
     def __init__(self, genome_length: int, is_circular: bool, origins: IntTensor, h_tgrid: DoubleTensor, g_xranges_l: IntTensor, g_xranges_u: IntTensor):
         super().__init__()
@@ -394,7 +404,7 @@ class VelocityModel(nn.Module):
             variance_fraction = cumsum(e.eigenvalues, dim=0) / sum(e.eigenvalues)
             i = argmax((variance_fraction >= dtensor([self.H_EIGENFUNCTION_VARIANCE_THRESHOLD])).view(torch.int8))
             variance_threshold = e.eigenvalues[i-1] if i > 0 else dtensor([0.0])
-            self.h_cov_eig = self.Eigenbasis(e.eigenvalues[i:], e.eigenvectors[:, i:], i, variance_threshold)
+            self.h_cov_eig = self.Eigenbasis(e.eigenvalues[i:], e.eigenvectors[:, i:], i.item(), variance_threshold)
             self.h_cov_eig_timescale = self.h_timescale
             # Update the non-h_log-dependent prefactor of the multivariate normal density of h_log
             # We thus compute h_prior_prefactor = -log(sqrt[(2pi)^k * |Sigma|]) where
