@@ -12,15 +12,18 @@ class FitVelocityModel:
         self.model = model
         self.loss = loss
 
-    def parameter_loss_function(self, optimizer, priors):
+    def parameter_loss_function(self, optimizer, params):
         def s():
+            # If any parameter is nan, return nan
+            if not reduce(operator.and_, [ all(isfinite(p)) for p in params ]):
+                return torch.tensor([math.nan])
             # Clamp parameters to their domain before each iteration
             self.model.clamp_parameters()
             # Evaluate loss and gradients
             with no_grad():
                 self.model.update_h_cov_eig()
             optimizer.zero_grad()
-            l = self.loss() + reduce(operator.add, [self.model.prior(p, False) for p in priors])
+            l = self.loss() + reduce(operator.add, [self.model.prior(p, False) for p in params])
             l.backward()
             return l
         return s
@@ -50,9 +53,10 @@ class FitVelocityModel:
         # First, optimize v0 and origin delays only
         self.model.v0 = nn.Parameter(self.model.v0)
         self.model.delay = nn.Parameter(self.model.delay)
-        v0_delay = [self.model.v0, self.model.delay]
-        optimize_v0_delay = optim.LBFGS(v0_delay, max_iter=500, line_search_fn="strong_wolfe")
-        optimize_v0_delay.step(self.parameter_loss_function(optimize_v0_delay, priors=v0_delay))
+        self.model.g_log = nn.Parameter(self.model.g_log)
+        v0_delay_g = [self.model.v0, self.model.delay, self.model.g_log]
+        optimize_v0_delay_g = optim.LBFGS(v0_delay_g, max_iter=500, line_search_fn="strong_wolfe", lr=0.1)
+        optimize_v0_delay_g.step(self.parameter_loss_function(optimize_v0_delay_g, params=v0_delay_g))
         # Make sure the final values lie within the parameter's domains
         self.model.clamp_parameters()
         # Normalize estimated parameters
@@ -61,8 +65,8 @@ class FitVelocityModel:
         self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
         self.model.g_log = nn.Parameter(self.model.g_log)
         params = [self.model.v0, self.model.delay, self.model.h_log_raw, self.model.g_log]
-        optimize_params = optim.LBFGS(params, max_iter=500, line_search_fn="strong_wolfe")
-        optimize_params.step(self.parameter_loss_function(optimize_params, priors=params))
+        optimize_params = optim.LBFGS(params, max_iter=500, line_search_fn="strong_wolfe", lr=0.1)
+        optimize_params.step(self.parameter_loss_function(optimize_params, params=params))
         # Make sure the final values lie within the parameter's domains
         self.model.clamp_parameters()
         # Normalize estimated parameters

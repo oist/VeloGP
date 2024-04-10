@@ -101,15 +101,22 @@ class VelocityModel(nn.Module):
         # updates are forbidding while auto-grad is active, but that's OK, this
         # function should be called *before* the model is evaluated.
         with no_grad():
+            assert all(isfinite(self.v0))
             self.v0.clamp_(0.0, math.inf)
+            assert all(isfinite(self.delay))
             self.delay.clamp_(0.0, math.inf)
+            assert all(isfinite(self.g_log))
+            self.g_log.clamp_(-10, 10)
+            assert all(isfinite(self.h_timescale))
             self.h_timescale.clamp_(0.0, math.inf)
+            assert all(isfinite(self.h_sigma))
             self.h_sigma.clamp_(0.0, math.inf)
             if self.h_basis == "canonical":
                 h_log_raw_scale = 1
             elif self.h_basis == "eigenbasis":
                 with no_grad():
                     h_log_raw_scale = (self.h_sigma ** 2) * self.h_eigenvalues()
+            assert all(isfinite(self.h_log_raw))
             self.h_log_raw.clamp_(-5 * h_log_raw_scale, 5 * h_log_raw_scale)
 
     def normalize_parameters(self):
@@ -486,13 +493,13 @@ class VelocityModelLoss(nn.Module):
     def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel):
         super().__init__()
         self.model = model
-        self.x = dtensor(x)
+        self.x = x
         self.x.requires_grad = False
         self.x_prep = self.model.prepare_input(self.x)
         assert self.x.dim() == 1
-        self.y_obs = dtensor(y_obs)
+        self.y_obs = y_obs
         self.y_obs.requires_grad = False
-        self.s_obs = dtensor(s_obs)
+        self.s_obs = s_obs
         self.s_obs.requires_grad = False
         assert self.y_obs.dim() in [1, 2]
         assert self.y_obs.size()[0] == self.x.size()[0]
