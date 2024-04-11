@@ -114,7 +114,10 @@ class VelocityModel(nn.Module):
                 h_log_raw_scale = 1
             elif self.h_basis == "eigenbasis":
                 with no_grad():
-                    h_log_raw_scale = (self.h_sigma ** 2) * self.h_eigenvalues()
+                    h_log_raw_scale = self.h_sigma * sqrt(self.h_eigenvalues())
+            elif self.h_basis == "eigenbasis_scaled":
+                with no_grad():
+                    h_log_raw_scale = self.h_sigma
             assert all(isfinite(self.h_log_raw))
             self.h_log_raw.clamp_(-5 * h_log_raw_scale, 5 * h_log_raw_scale)
 
@@ -175,7 +178,7 @@ class VelocityModel(nn.Module):
         if self.h_basis == "canonical":
             d = sqrt(diagonal(h_log_raw_posterior_cov)[idx])
             return exp(self.h_log_raw[idx]) * d
-        elif self.h_basis == "eigenbasis":
+        elif self.h_basis in [ "eigenbasis", "eigenbasis_scaled" ]:
             d = sqrt(diagonal(matmul(self.h_eigenbasis(),
                                      matmul(h_log_raw_posterior_cov,
                                             t(self.h_eigenbasis()))))[idx])
@@ -336,7 +339,7 @@ class VelocityModel(nn.Module):
         the covariance matrix of log(h(h_tgrid[1])), ..., log(h(h_tgrid[k])). Eigenvectors whose eigenvalue is
         negative (due to rounding errors) or less than the eigenvalue threshold are ignored, in that case kp < k.
 
-        :param newbasis: The basis to switch to ('canonical' or 'eigenbasis')
+        :param newbasis: The basis to switch to ('canonical' or 'eigenbasis' or 'eigenbasis_scaled')
         """
         if self.h_basis != newbasis:
             with no_grad():
@@ -356,8 +359,16 @@ class VelocityModel(nn.Module):
         """
         if (self.h_basis == "canonical") and (basis == "eigenbasis"):
             return matmul(self.h_log_raw, self.h_eigenbasis())
+        elif (self.h_basis == "canonical") and (basis == "eigenbasis_scaled"):
+            return matmul(self.h_log_raw, self.h_eigenbasis()) / sqrt(self.h_eigenvalues())
         elif (self.h_basis == "eigenbasis") and (basis == "canonical"):
             return matmul(self.h_eigenbasis(), self.h_log_raw)
+        elif (self.h_basis == "eigenbasis_scaled") and (basis == "canonical"):
+            return matmul(self.h_eigenbasis(), self.h_log_raw * sqrt(self.h_eigenvalues()))
+        elif (self.h_basis == "eigenbasis" and (basis == "eigenbasis_scaled")):
+            return self.h_log_raw / sqrt(self.h_eigenvalues())
+        elif (self.h_basis == "eigenbasis_scaled" and (basis == "eigenbasis")):
+            return self.h_log_raw * sqrt(self.h_eigenvalues())
         elif self.h_basis == basis:
             return self.h_log_raw
         else:
@@ -371,12 +382,13 @@ class VelocityModel(nn.Module):
         """
         if self.h_basis == "canonical":
             s = exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2)))
-            return (self.h_sigma ** 2) * s if include_sigma else s
         elif self.h_basis == "eigenbasis":
-            s = diagflat(diagflat(self.h_eigenvalues()))
-            return (self.h_sigma ** 2) * s if include_sigma else s
+            s = diagflat(self.h_eigenvalues())
+        elif self.h_basis == "eigenbasis_scaled":
+            s = diagflat(ones_like(self.h_eigenvalues()))
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
+        return (self.h_sigma ** 2) * s if include_sigma else s
 
     def h_cov_inv(self, include_sigma=True) -> Tensor:
         """The inverse of the covariance matrix of log(h(h_tgrid[1])), ..., log(h(h_tgrid[k]))
@@ -385,13 +397,14 @@ class VelocityModel(nn.Module):
         :return: the covariance matrix
         """
         if self.h_basis == "canonical":
-            s = cholesky_inverse(exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2))))
-            return s / (self.h_sigma ** 2) if include_sigma else s
+            s = cholesky_inverse(self.h_cov(include_sigma=False))
         elif self.h_basis == "eigenbasis":
             s = diagflat(dtensor([1.0]) / self.h_eigenvalues())
-            return s / (self.h_sigma ** 2) if include_sigma else s
+        elif self.h_basis == "eigenbasis_scaled":
+            s = diagflat(ones_like(self.h_eigenvalues()))
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
+        return s / (self.h_sigma ** 2) if include_sigma else s
 
     def update_h_cov_eig(self):
         """Recompute the eigenvalues and eigenvectors of self.h_cov()"""
@@ -461,7 +474,7 @@ class VelocityModel(nn.Module):
         # to the squared-distance from the mean)
         self.update_h_cov_eig()
         r = self.h_prior_prefactor if hyperparameter_dependence else 0
-        r -= 0.5 * sum((self.h_log("eigenbasis") ** 2) / ((self.h_sigma ** 2) * self.h_eigenvalues()))
+        r -= 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2) / (self.h_sigma ** 2)
         return r
 
     def sample_hlog(self, basis : str, sample_shape : torch.Size = torch.Size([1])):
@@ -470,11 +483,13 @@ class VelocityModel(nn.Module):
         # has eigenvectors that are significantly larger than zero.
         shape = (self.h_cov_eig.eigenvalues.size()[0],) + sample_shape
         z = torch.distributions.normal.Normal(dtensor([0.0]), dtensor([1.0])).rsample(shape)
-        # Generate random h_log in the eigenbasis representation
-        z = z * (self.h_sigma ** 2) * self.h_cov_eig.eigenvalues[:, (None,) * len(sample_shape)]
+        # Generate random h_log in the eigenbasis_scaled representation
+        z = z * self.h_sigma
         if basis == "canonical":
-            return matmul(self.h_eigenbasis(), z)
+            return matmul(self.h_eigenbasis(), z * sqrt(self.h_eigenvalues())[:, (None,) * len(sample_shape)])
         elif basis == "eigenbasis":
+            return z * sqrt(self.h_eigenvalues())[:, (None,) * len(sample_shape)]
+        elif basis == "eigenbasis_scaled":
             return z
         else:
             raise ValueError("Invalid basis " + basis)
