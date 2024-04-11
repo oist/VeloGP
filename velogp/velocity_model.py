@@ -1,10 +1,9 @@
+from typing import Any, Dict, Optional, Union, Tuple, List
+import builtins
 import functools
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Union, Tuple, List
 from collections import namedtuple
 import math
-import builtins
-
 import numpy as np
 import torch
 from torch import nn, linalg
@@ -106,7 +105,7 @@ class VelocityModel(nn.Module):
             assert all(isfinite(self.delay))
             self.delay.clamp_(0.0, math.inf)
             assert all(isfinite(self.g_log))
-            self.g_log.clamp_(-10, 10)
+            self.g_log.clamp_(0.0, 10)
             assert all(isfinite(self.h_timescale))
             self.h_timescale.clamp_(0.0, math.inf)
             assert all(isfinite(self.h_sigma))
@@ -141,8 +140,8 @@ class VelocityModel(nn.Module):
         if pmap is None:
             pc = posterior_cov
         else:
-            assert id(self.h_log_raw) in pmap
-            i, l = pmap[id(self.h_log_raw)], numel(self.h_log_raw)
+            assert "h_log_raw" in pmap
+            i, l = pmap["h_log_raw"], numel(self.h_log_raw)
             pc = posterior_cov[i:(i+l), i:(i+l)]
 
         return self.v0 * self.h_posterior_stderr(t, pc)
@@ -341,7 +340,10 @@ class VelocityModel(nn.Module):
         """
         if self.h_basis != newbasis:
             with no_grad():
-                self.h_log_raw = self.h_log(newbasis)
+                if isinstance(self.h_log_raw, nn.Parameter):
+                    self.h_log_raw = nn.Parameter(self.h_log(newbasis))
+                else:
+                    self.h_log_raw = self.h_log(newbasis)
             self.h_basis = newbasis
 
     def h_log(self, basis: str):
@@ -523,11 +525,15 @@ class VelocityModelLoss(nn.Module):
     def forward(self) -> Tensor:
         return 0.5 * sum(self.weights * ((self.y_obs - self.y_pred()) ** 2))
 
-    def jacobian(self, params: List[nn.Parameter]):
+    def jacobian(self, params: List[nn.Parameter]) -> Tuple[Tensor, Dict[str, nn.Parameter]]:
+        # Resolve parameter names
+        names = {}
+        for name, param in self.model.named_parameters():
+            names[id(param)] = name
         # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i of the
         # jacobian, where n_i is the number of elements of the i-th parameter tensor
         c = [0] + np.cumsum([ numel(p) for i, p in enumerate(params) ]).tolist()
-        pmap = { id(pi): ci for (ci, pi) in zip(c[:-1], params) }
+        pmap = { names[id(pi)]: ci for (ci, pi) in zip(c[:-1], params) }
         # Evaluate model for all locations to find scaling factor
         _, scale = self.abundance_and_scale()
         # Prepare output matrix
