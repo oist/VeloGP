@@ -332,12 +332,21 @@ class VelocityModel(nn.Module):
         The represented h_log stays the same, i.e. h_log("canonical") does not change
         (except for numerical errors). The possible bases are
 
-        (1) 'canonical'. log(h(t)) is represented by the vector log(h(h_tgrid[1])), ..., log(h(h_tgrid[k]))
+        (1) 'canonical'. log(h(t)) is represented by the vector
+            log(h(h_tgrid[1])), ..., log(h(h_tgrid[k]))
 
-        (2) 'eigenbasis'. log(h(t)) is represented by the vector [c1, ..., ck] such that
-        sum_i c[i] * v[i] = is log(h(h_tgrid[1])), ..., log(h(h_tgrid[kp])) where v[i] are the eigenvectors of
-        the covariance matrix of log(h(h_tgrid[1])), ..., log(h(h_tgrid[k])). Eigenvectors whose eigenvalue is
-        negative (due to rounding errors) or less than the eigenvalue threshold are ignored, in that case kp < k.
+        (2) 'eigenbasis'. log(h(t)) is represented by the vector
+            [c1, ..., ck]
+        such that
+            h_sigma * sum_i { c[i] * v[i] } = log(h(h_tgrid[1])), ..., log(h(h_tgrid[kp]))
+        where v[i] are the eigenvectors of the covariance matrix of
+        log(h(h_tgrid[1])), ..., log(h(h_tgrid[k])). Eigenvectors whose eigenvalue is
+        negative (due to rounding errors) or less than the eigenvalue threshold are ignored,
+        in that case kp < k.
+
+        (3) 'eigenbasis_scaled'. Same as (2) except that the entries of c[i] are scaled, i.e.
+            h_sigma * sum_i { c[i] * l[i] * v[i] } = log(h(h_tgrid[1])), ..., log(h(h_tgrid[kp]))
+        where l[i] is the eigenvalue that belongs to eigenvector v[i].
 
         :param newbasis: The basis to switch to ('canonical' or 'eigenbasis' or 'eigenbasis_scaled')
         """
@@ -375,7 +384,7 @@ class VelocityModel(nn.Module):
             raise ValueError("invalid basis " + self.h_basis + " or " + basis)
 
     def h_cov(self, include_sigma=True) -> Tensor:
-        """The covariance matrix of log(h(h_log_raw[1])), ..., log(h(h_log_raw[k]))
+        """The covariance matrix of (h_log_raw[1], ..., h_log_raw[k])
 
         :param  include_sigma: Whether to Don't include the pre-factor h_sigma ** 2
         :return: the covariance matrix
@@ -391,7 +400,7 @@ class VelocityModel(nn.Module):
         return (self.h_sigma ** 2) * s if include_sigma else s
 
     def h_cov_inv(self, include_sigma=True) -> Tensor:
-        """The inverse of the covariance matrix of log(h(h_tgrid[1])), ..., log(h(h_tgrid[k]))
+        """The inverse of the covariance matrix of (h_log_raw[1], ..., h_log_raw[k])
 
         :param  include_sigma: Whether to Don't include the pre-factor 1 / h_sigma ** 2
         :return: the covariance matrix
