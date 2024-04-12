@@ -23,8 +23,23 @@ class VelocityModel(nn.Module):
     class Eigenbasis:
         eigenvalues: Tensor
         eigenvectors: Tensor
+        n: int
         k: int
-        threshold: Tensor
+        log_variance_ignored: Tensor
+
+        @staticmethod
+        def make(M: Tensor):
+            e = linalg.eigh(M)
+            # Remove the first i eigenvalues (the smallest) where is chosen such that no
+            # more than a fraction of self.H_EIGENFUNCTION_VARIANCE_THRESHOLD of the total
+            # variance (i.e. sum of eigenvalues) is removed. This essentially removes
+            # components for which even small changes would have very drastic effects on
+            # the prior likelihood, which poses a challenge for the optimizer.
+            variance_fraction = cumsum(e.eigenvalues, dim=0) / sum(e.eigenvalues)
+            i = argmax((variance_fraction >= dtensor([VelocityModel.H_EIGENFUNCTION_VARIANCE_THRESHOLD])).view(torch.int8))
+            log_variance_ignored = log(sum(e.eigenvalues[:(i - 1)])) if i > 0 else dtensor([0.0])
+            n = e.eigenvalues.size()[0]
+            return VelocityModel.Eigenbasis(e.eigenvalues[i:], e.eigenvectors[:, i:], n, n - i, log_variance_ignored)
 
     @dataclass
     class X:
@@ -423,16 +438,7 @@ class VelocityModel(nn.Module):
             # Find eigenvalues and eigenvectors of the symmetric matrix h_cov(). We don't
             # include the pre-factor h_sigma^2 here, this avoids having to recompute things
             # if the prefactor changes.
-            e = linalg.eigh(self.h_cov(include_sigma=False))
-            # Remove the first i eigenvalues (the smallest) where is chosen such that no
-            # more than a fraction of self.H_EIGENFUNCTION_VARIANCE_THRESHOLD of the total
-            # variance (i.e. sum of eigenvalues) is removed. This essentially removes
-            # components for which even small changes would have very drastic effects on
-            # the prior likelihood, which poses a challenge for the optimizer.
-            variance_fraction = cumsum(e.eigenvalues, dim=0) / sum(e.eigenvalues)
-            i = argmax((variance_fraction >= dtensor([self.H_EIGENFUNCTION_VARIANCE_THRESHOLD])).view(torch.int8))
-            variance_threshold = e.eigenvalues[i-1] if i > 0 else dtensor([0.0])
-            self.h_cov_eig = self.Eigenbasis(e.eigenvalues[i:], e.eigenvectors[:, i:], i.item(), variance_threshold)
+            self.h_cov_eig = VelocityModel.Eigenbasis.make(self.h_cov(include_sigma=False))
             self.h_cov_eig_timescale = self.h_timescale
             # Update the non-h_log-dependent prefactor of the multivariate normal density of h_log
             # We thus compute h_prior_prefactor = -log(sqrt[(2pi)^k * |Sigma|]) where
@@ -448,7 +454,7 @@ class VelocityModel(nn.Module):
                 dtensor([- 0.5 * math.log(2*math.pi) * len(self.h_tgrid)])
                 - log(self.h_sigma) * len(self.h_tgrid)
                 - 0.5 * sum(log(self.h_cov_eig.eigenvalues))
-                - 0.5 * log(self.h_cov_eig.threshold) * (len(self.h_tgrid) - self.h_cov_eig.k)
+                - 0.5 * self.h_cov_eig.log_variance_ignored
             )
             # Switch back to the original basis
             self.h_switch_basis(basis)
