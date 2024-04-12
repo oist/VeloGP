@@ -189,14 +189,13 @@ class VelocityModel(nn.Module):
         idx = self.h_indices(times)
         if self.h_basis == "canonical":
             d = sqrt(diagonal(h_log_raw_posterior_cov)[idx])
-            return exp(self.h_log_raw[idx]) * d
-        elif self.h_basis in [ "eigenbasis" ]:
+        elif self.h_basis == "eigenbasis":
             d = sqrt(diagonal(matmul(self.h_eigenbasis(),
                                      matmul(h_log_raw_posterior_cov,
                                             t(self.h_eigenbasis()))))[idx])
-            return exp(self.h_log("canonical")[idx]) * d
         else:
             raise ValueError("invalid basis " + self.h_basis)
+        return exp(self.h_log("canonical")[idx]) * d
 
     def H(self, t: Tensor) -> Tensor:
         """Evaluates H(t) = int_0^t h(u) du at the specified points t
