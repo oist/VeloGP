@@ -139,13 +139,10 @@ class VelocityModel(nn.Module):
         """
         return self.v0 * self.h(t)
 
-    def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[int, int] = None) -> Tensor:
-        if pmap is None:
-            pc = posterior_cov
-        else:
-            assert "h_log_raw" in pmap
-            i, l = pmap["h_log_raw"], numel(self.h_log_raw)
-            pc = posterior_cov[i:(i+l), i:(i+l)]
+    def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[int, int]) -> Tensor:
+        assert "h_log_raw" in pmap
+        i, l = pmap["h_log_raw"], numel(self.h_log_raw)
+        pc = posterior_cov[i:(i + l), i:(i + l)]
 
         return self.v0 * self.h_posterior_stderr(t, pc)
 
