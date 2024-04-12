@@ -29,19 +29,24 @@ class FitVelocityModel:
             return l
         return s
 
-    def parameter_posterior_cov(self):
+    def parameter_posterior_cov_inv(self):
         params = [self.model.v0, self.model.delay, self.model.g_log, self.model.h_log_raw]
         dM, pmap = self.loss.jacobian(params)
         # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
-        u = einsum("ij,j,jk->ik", t(dM), self.loss.weights, dM)
+        u = einsum("ji,j,jk->ik", dM, self.loss.weights, dM).clone()
         # Add Sigma_h^-1 for h_log_raw, which has a GP prior
         # We do this by querying the parameter map to find the
         # sub-matrix of u that corresponds to the parameter h_log_raw,
         # and adding the inverse of its prior covariance matrix
         i, l = pmap["h_log_raw"], numel(self.model.h_log_raw)
         u[i:(i+l), i:(i+l)] += self.model.h_cov_inv()
-        # The covariance matrix is the inverse of u
-        return cholesky_inverse(u), pmap
+        return u, pmap
+
+    def parameter_posterior_cov(self):
+        u, pmap = self.parameter_posterior_cov_inv()
+        eb = VelocityModel.Eigenbasis.make(u)
+        uinv = einsum("ij,j,kj->ik", eb.eigenvectors, tensor([1.0]) / eb.eigenvalues, eb.eigenvectors)
+        return uinv, pmap
 
     def h_sigma_lengthscale_loss_function(self, optimizer):
         def s():

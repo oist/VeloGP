@@ -418,7 +418,7 @@ class VelocityModel(nn.Module):
         :return: the covariance matrix
         """
         if self.h_basis == "canonical":
-            s = cholesky_inverse(self.h_cov(include_sigma=False))
+            s = einsum("ij,j,kj->ik", self.h_eigenbasis(), dtensor([1.0]) / self.h_eigenvalues(), self.h_eigenbasis())
         elif self.h_basis == "eigenbasis":
             s = diagflat(dtensor([1.0]) / self.h_eigenvalues())
         elif self.h_basis == "eigenbasis_scaled":
