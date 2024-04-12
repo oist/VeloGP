@@ -452,10 +452,10 @@ class VelocityModel(nn.Module):
             # thus replace those eigenvalues by the threshold, thus essentially bounding the
             # eigenvalues from below.
             self.h_prior_prefactor = (
-                dtensor([- 0.5 * math.log(2*math.pi) * len(self.h_tgrid)])
-                - log(self.h_sigma) * len(self.h_tgrid)
-                - 0.5 * sum(log(self.h_cov_eig.eigenvalues))
-                - 0.5 * self.h_cov_eig.log_variance_ignored
+                dtensor([0.5 * math.log(2*math.pi) * len(self.h_tgrid)])
+                + log(self.h_sigma) * len(self.h_tgrid)
+                + 0.5 * sum(log(self.h_cov_eig.eigenvalues))
+                + 0.5 * self.h_cov_eig.log_variance_ignored
             )
             # Switch back to the original basis
             self.h_switch_basis(basis)
@@ -487,23 +487,23 @@ class VelocityModel(nn.Module):
         # to the squared-distance from the mean)
         self.update_h_cov_eig()
         r = self.h_prior_prefactor if hyperparameter_dependence else 0
-        r -= 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2) / (self.h_sigma ** 2)
+        r += 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2) / (self.h_sigma ** 2)
         return r
 
     def prior_glog(self, hyperparameter_dependence):
         """The prior log-probability of self.g_log as a realization of independent Gaussians
 
-        Returns the log of the probability (or, rather, density) of self.g_log as samples of independent
+        Returns the negative log-probability (or, rather, log-density) of self.g_log as samples of independent
         Gaussian distribution with mean zero and covariance self.g_sigma^2
 
-        :param hdependent_only: Whether to return the full density, or only the h_log-dependent terms
+        :param hdependent_only: Whether to return the full density, or only the g_log-dependent terms
         """
         if hyperparameter_dependence:
-            r = (dtensor([- 0.5 * math.log(2*math.pi) * len(self.g_log)])
-                 - log(self.g_sigma) * len(self.g_log))
+            r = (dtensor([0.5 * math.log(2*math.pi) * len(self.g_log)])
+                 + log(self.g_sigma) * len(self.g_log))
         else:
             r = 0
-        r -= 0.5 * sum(self.g_log ** 2) / (self.g_sigma ** 2)
+        r += 0.5 * sum(self.g_log ** 2) / (self.g_sigma ** 2)
         return r
 
 
