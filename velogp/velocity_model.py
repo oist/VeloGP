@@ -175,7 +175,7 @@ class VelocityModel(nn.Module):
         if self.h_basis == "canonical":
             d = sqrt(diagonal(h_log_raw_posterior_cov)[idx])
             return exp(self.h_log_raw[idx]) * d
-        elif self.h_basis in [ "eigenbasis", "eigenbasis_scaled" ]:
+        elif self.h_basis in [ "eigenbasis" ]:
             d = sqrt(diagonal(matmul(self.h_eigenbasis(),
                                      matmul(h_log_raw_posterior_cov,
                                             t(self.h_eigenbasis()))))[idx])
