@@ -1,8 +1,9 @@
 from typing import Any, Dict, Optional, Union, Tuple
 import operator
 from functools import reduce
-from velocity_model import VelocityModel, VelocityModelLoss
+from velocity_model import VelocityModel, VelocityModelLoss, dtensor
 import math
+import numpy as np
 import torch
 from torch import nn, optim
 from torch import *
@@ -30,7 +31,7 @@ class FitVelocityModel:
         return s
 
     def parameter_posterior_cov_inv(self):
-        params = [self.model.v0, self.model.delay, self.model.g_log, self.model.h_log_raw]
+        params = [self.model.v0, self.model.g_log, self.model.h_log_raw]
         dM, pmap = self.loss.jacobian(params)
         # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
         u = einsum("ji,j,jk->ik", dM, self.loss.weights, dM).clone()
@@ -55,35 +56,51 @@ class FitVelocityModel:
         def s():
             raise "Implement me"
 
+    def local_fit(self, origin : Tensor, neighbourhood : int):
+        # We use that A(d) = A(o) * exp(- k * |d|) where k = lambda/v, o is
+        # the origin and d is the distance from the origin. It follows that
+        # log A(d) = log A(o) - k * |d|, i.e. we can estimate A(o) and k using
+        # ordinary least squares.
+        s = (abs(self.loss.x - origin) <= neighbourhood)
+        x = self.loss.x[s]
+        log_a = log(self.loss.y_obs[s]).detach().numpy()
+        d = abs(x - origin).detach().numpy()
+        r = np.linalg.lstsq(np.vstack([d, np.ones_like(d)]).T, log_a, rcond=None)[0]
+        k = - r[0]
+        log_a0 = r[1]
+        if k <= 0:
+            raise RuntimeError(f"no local maximum around origin at {origin}")
+        return dtensor(k), dtensor(log_a0)
 
     def optimize_parameters(self):
-        self.model.h_switch_basis("eigenbasis")
-        # I. Optimize v0 and origin delays
-        self.model.v0 = nn.Parameter(self.model.v0)
-        self.model.delay = nn.Parameter(self.model.delay)
-        v0_delay = [self.model.v0, self.model.delay ]
-        optimize_v0_delay = optim.LBFGS(v0_delay, max_iter=500, line_search_fn="strong_wolfe", lr=0.01)
-        optimize_v0_delay.step(self.parameter_loss_function(optimize_v0_delay, params=v0_delay))
-        # Make sure the final values lie within the parameter's domains
-        self.model.clamp_parameters()
-        # Normalize estimated parameters
-        self.model.normalize_parameters()
+        self.model.h_switch_basis("canonical")
+        # I. Fit A(d) = A(o) * exp(- k * |d|) where k = lambda/v locally. Then
+        # use the global relationship A(o) = A_max * exp(- lambda * delta_o)
+        # between the abundances A(o) at different. origins o and the firing
+        # delay delta_o of those origins to estimate delta_o.
+        n = self.model.origins.size()[0]
+        origin_v = dtensor([nan] * n)
+        origin_loga0 = dtensor([nan] * n)
+        for i in range(0, n):
+            k, log_a0 = self.local_fit(self.model.origins[i], 200000)
+            origin_v[i] = self.model.growthrate / k
+            origin_loga0[i] = log_a0
+        self.model.delay[:] = (max(origin_loga0) - origin_loga0) / self.model.growthrate
+        self.model.v0[0] = mean(origin_v)
         # II. Optimize g()
+        self.model.v0 = nn.Parameter(self.model.v0)
         self.model.g_log = nn.Parameter(self.model.g_log)
-        v0_delay_g = v0_delay + [ self.model.g_log ]
-        optimize_v0_delay_g = optim.LBFGS(v0_delay_g, max_iter=500, history_size=100, line_search_fn="strong_wolfe", lr=0.01)
-        optimize_v0_delay_g.step(self.parameter_loss_function(optimize_v0_delay_g, params=v0_delay_g))
+        v0_g = [ self.model.v0, self.model.g_log ]
+        optimize_v0_g = optim.LBFGS(v0_g, max_iter=1000, line_search_fn="strong_wolfe", lr=0.01)
+        optimize_v0_g.step(self.parameter_loss_function(optimize_v0_g, params=v0_g))
         # Make sure the final values lie within the parameter's domains
         self.model.clamp_parameters()
-        # Normalize estimated parameters
-        self.model.normalize_parameters()
         # III. Optimize h()
+        self.model.h_switch_basis("eigenbasis")
         self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
-        v0_delay_g_h = v0_delay_g + [ self.model.h_log_raw ]
-        optimize_v0_delay_g_h = optim.LBFGS(v0_delay_g_h, max_iter=500, line_search_fn="strong_wolfe", lr=0.01)
-        optimize_v0_delay_g_h.step(self.parameter_loss_function(optimize_v0_delay_g_h, params=v0_delay_g_h))
+        v0_g_h = v0_g + [ self.model.h_log_raw ]
+        optimize_v0_g_h = optim.LBFGS(v0_g_h, max_iter=500, line_search_fn="strong_wolfe", lr=0.01)
+        optimize_v0_g_h.step(self.parameter_loss_function(optimize_v0_g_h, params=v0_g_h))
         # Make sure the final values lie within the parameter's domains
         self.model.clamp_parameters()
         # Normalize estimated parameters
-        self.model.normalize_parameters()
-        #self.model.h_switch_basis("canonical")
