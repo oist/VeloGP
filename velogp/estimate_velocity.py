@@ -40,6 +40,9 @@ class FitVelocityModel:
         # and adding the inverse of its prior covariance matrix
         i, l = pmap["h_log_raw"], numel(self.model.h_log_raw)
         u[i:(i+l), i:(i+l)] += self.model.h_cov_inv()
+        # Add prior for g_log
+        i, l = pmap["g_log"], numel(self.model.g_log)
+        u[i:(i+l), i:(i+l)] += 1.0 / self.model.g_sigma ** 2
         return u, pmap
 
     def parameter_posterior_cov(self):

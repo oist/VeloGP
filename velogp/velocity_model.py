@@ -90,6 +90,8 @@ class VelocityModel(nn.Module):
                 self.origins_augmented.requires_grad = False
             # Replication delayys
             self.delay = zeros_like(self.origins, dtype=torch.double)
+            # Spatial effects hyperparameters
+            self.g_sigma = tensor([1.0], requires_grad=False)
             # Intervals on which g(x) differs from 1.0
             self.g_xranges_l = g_xranges_l
             self.g_xranges_u = g_xranges_u
@@ -488,6 +490,23 @@ class VelocityModel(nn.Module):
         r -= 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2) / (self.h_sigma ** 2)
         return r
 
+    def prior_glog(self, hyperparameter_dependence):
+        """The prior log-probability of self.g_log as a realization of independent Gaussians
+
+        Returns the log of the probability (or, rather, density) of self.g_log as samples of independent
+        Gaussian distribution with mean zero and covariance self.g_sigma^2
+
+        :param hdependent_only: Whether to return the full density, or only the h_log-dependent terms
+        """
+        if hyperparameter_dependence:
+            r = (dtensor([- 0.5 * math.log(2*math.pi) * len(self.g_log)])
+                 - log(self.g_sigma) * len(self.g_log))
+        else:
+            r = 0
+        r -= 0.5 * sum(self.g_log ** 2) / (self.g_sigma ** 2)
+        return r
+
+
     def sample_hlog(self, basis : str, sample_shape : torch.Size = torch.Size([1])):
         self.update_h_cov_eig()
         # Generate as many standard-normal random variables for each sample as the covariance matrix of h
@@ -513,7 +532,7 @@ class VelocityModel(nn.Module):
         elif parameter is self.h_log_raw:
             return self.prior_hlog(hyperparameter_dependence=hyperparameter_dependence)
         elif parameter is self.g_log:
-            return 0
+            return self.prior_glog(hyperparameter_dependence=hyperparameter_dependence)
         else:
             raise RuntimeError("no prior defined for this parameter")
 
