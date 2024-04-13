@@ -14,19 +14,28 @@ class FitVelocityModel:
         self.model = model
         self.loss = loss
 
-    def parameter_loss_function(self, optimizer, params):
+    def parameter_loss_function(self, params):
         def s():
             # If any parameter is nan, return nan
             if not reduce(operator.and_, [ all(isfinite(p)) for p in params ]):
+                print("WARNING: some parameters are NaN, returning NaN", file=sys.stderr)
                 return torch.tensor([math.nan])
             # Clamp parameters to their domain before each iteration
             self.model.clamp_parameters()
             # Evaluate loss and gradients
             with no_grad():
                 self.model.update_h_cov_eig()
-            optimizer.zero_grad()
+            # Zero gradients
+            for p in params:
+                if p.grad is not None:
+                    p.grad.zero_()
+            # Compute loss
             l = self.loss() + reduce(operator.add, [self.model.prior(p, False) for p in params])
             l.backward()
+#            for n, p in self.model.named_parameters():
+#                print(f"{n}: {p}")
+#                print(f"grad {n}: {p.grad}")
+#            print(f"loss: {l}")
             return l
         return s
 
@@ -72,9 +81,25 @@ class FitVelocityModel:
             raise RuntimeError(f"no local maximum around origin at {origin}")
         return dtensor(k), dtensor(log_a0)
 
+    def optimizer_loop(self, loss_function, optimizer, steps=10000):
+        for i in range(steps):
+            loss_function()
+            optimizer.step()
+
+    def run_lbfgs(self, params):
+        opt = optim.LBFGS(params, lr=0.01, max_iter=500, max_eval=10000,
+                          tolerance_change=-math.inf, line_search_fn="strong_wolfe")
+        loss = self.parameter_loss_function(params)
+        for i in range(10):
+            opt.step(loss)
+        # Make sure the final values lie within the parameter's domains
+        self.model.clamp_parameters()
+        return opt
+
     def optimize_parameters(self):
         self.model.h_switch_basis("canonical")
-        # I. Fit A(d) = A(o) * exp(- k * |d|) where k = lambda/v locally. Then
+        # I. Find origin delays
+        # Fit A(d) = A(o) * exp(- k * |d|) where k = lambda/v locally. Then
         # use the global relationship A(o) = A_max * exp(- lambda * delta_o)
         # between the abundances A(o) at different. origins o and the firing
         # delay delta_o of those origins to estimate delta_o.
@@ -90,17 +115,9 @@ class FitVelocityModel:
         # II. Optimize g()
         self.model.v0 = nn.Parameter(self.model.v0)
         self.model.g_log = nn.Parameter(self.model.g_log)
-        v0_g = [ self.model.v0, self.model.g_log ]
-        optimize_v0_g = optim.LBFGS(v0_g, max_iter=1000, line_search_fn="strong_wolfe", lr=0.01)
-        optimize_v0_g.step(self.parameter_loss_function(optimize_v0_g, params=v0_g))
-        # Make sure the final values lie within the parameter's domains
-        self.model.clamp_parameters()
+        optimize_v0_g = self.run_lbfgs([ self.model.v0, self.model.g_log ])
         # III. Optimize h()
         self.model.h_switch_basis("eigenbasis")
         self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
-        v0_g_h = v0_g + [ self.model.h_log_raw ]
-        optimize_v0_g_h = optim.LBFGS(v0_g_h, max_iter=500, line_search_fn="strong_wolfe", lr=0.01)
-        optimize_v0_g_h.step(self.parameter_loss_function(optimize_v0_g_h, params=v0_g_h))
-        # Make sure the final values lie within the parameter's domains
-        self.model.clamp_parameters()
-        # Normalize estimated parameters
+        optimize_v0_g_h = self.run_lbfgs([ self.model.v0, self.model.g_log, self.model.h_log_raw ])
+        return (optimize_v0_g.state_dict(), optimize_v0_g_h.state_dict())
