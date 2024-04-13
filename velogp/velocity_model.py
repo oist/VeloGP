@@ -138,16 +138,6 @@ class VelocityModel(nn.Module):
             assert all(isfinite(self.h_log_raw))
             self.h_log_raw.clamp_(-5 * h_log_raw_scale, 5 * h_log_raw_scale)
 
-    def normalize_parameters(self):
-        with no_grad():
-            # The delay parameter actually only has k-1 degrees of freedom,
-            # where k is the number of origins. Actually parameterizing with
-            # k-1 parameters, however, is difficult without either breaking
-            # symmetry or interfering with gradient descent. We therefore
-            # enforce the constraint that one delay must be here, which takes
-            # effect *after* the optimizer has finished.
-            self.delay.sub_(min(self.delay))
-
     def v_t(self, t: Tensor) -> Tensor:
         """Evaluates v_t(t) = v0 * h(t) at the specified points t
 
@@ -473,8 +463,9 @@ class VelocityModel(nn.Module):
     def prior_hlog(self, hyperparameter_dependence):
         """The prior log-probability of self.h_log as a realization of a Gaussian process
 
-        Returns the log of the probability (or, rather, density) of self.h_log as a sample of a multivariate
-        Gaussian distribution with mean zero and covariance matrix self.h_sigma^2 *  self.h_cov().
+        Returns the negative log of the probability (or, rather, density) of self.h_log as a sample
+        of a multivariate Gaussian distribution with mean zero and covariance matrix
+        self.h_sigma^2 *  self.h_cov().
 
         :param hdependent_only: Whether to return the full density, or only the h_log-dependent terms
         """
