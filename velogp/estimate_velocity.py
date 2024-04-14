@@ -49,7 +49,7 @@ class FitVelocityModel:
         # sub-matrix of u that corresponds to the parameter h_log_raw,
         # and adding the inverse of its prior covariance matrix
         i, l = pmap["h_log_raw"], numel(self.model.h_log_raw)
-        u[i:(i+l), i:(i+l)] += self.model.h_cov_inv()
+        u[i:(i+l), i:(i+l)] += self.model.h_cov_inv(include_sigma=True)
         # Add prior for g_log
         i, l = pmap["g_log"], numel(self.model.g_log)
         u[i:(i+l), i:(i+l)] += 1.0 / self.model.g_sigma ** 2
@@ -118,7 +118,7 @@ class FitVelocityModel:
         self.model.g_log = nn.Parameter(self.model.g_log)
         optimize_v0_g = self.run_lbfgs([ self.model.v0_scaled, self.model.g_log ])
         # III. Optimize h()
-        self.model.h_switch_basis("eigenbasis")
+        self.model.h_switch_basis("eigenbasis_scaled")
         self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
         optimize_v0_g_h = self.run_lbfgs([ self.model.v0_scaled, self.model.g_log, self.model.h_log_raw ])
         return (optimize_v0_g.state_dict(), optimize_v0_g_h.state_dict())

@@ -136,7 +136,7 @@ class VelocityModel(nn.Module):
                     h_log_raw_scale = self.h_sigma * sqrt(self.h_eigenvalues())
             elif self.h_basis == "eigenbasis_scaled":
                 with no_grad():
-                    h_log_raw_scale = self.h_sigma
+                    h_log_raw_scale = dtensor([1.0])
             assert all(isfinite(self.h_log_raw))
             self.h_log_raw.clamp_(-5 * h_log_raw_scale, 5 * h_log_raw_scale)
 
@@ -196,6 +196,11 @@ class VelocityModel(nn.Module):
             d = sqrt(diagonal(matmul(self.h_eigenbasis(),
                                      matmul(h_log_raw_posterior_cov,
                                             t(self.h_eigenbasis()))))[idx])
+        elif self.h_basis == "eigenbasis_scaled":
+            cv = einsum("ij,i,j->ij", h_log_raw_posterior_cov,
+                        sqrt(self.h_eigenvalues()), sqrt(self.h_eigenvalues()))
+            d = self.h_sigma * sqrt(diagonal(matmul(self.h_eigenbasis(),
+                                                    matmul(cv, t(self.h_eigenbasis()))))[idx])
         else:
             raise ValueError("invalid basis " + self.h_basis)
         return exp(self.h_log("canonical")[idx]) * d
@@ -383,15 +388,15 @@ class VelocityModel(nn.Module):
         if (self.h_basis == "canonical") and (basis == "eigenbasis"):
             return matmul(self.h_log_raw, self.h_eigenbasis())
         elif (self.h_basis == "canonical") and (basis == "eigenbasis_scaled"):
-            return matmul(self.h_log_raw, self.h_eigenbasis()) / sqrt(self.h_eigenvalues())
+            return matmul(self.h_log_raw, self.h_eigenbasis()) / (self.h_sigma * sqrt(self.h_eigenvalues()))
         elif (self.h_basis == "eigenbasis") and (basis == "canonical"):
             return matmul(self.h_eigenbasis(), self.h_log_raw)
         elif (self.h_basis == "eigenbasis_scaled") and (basis == "canonical"):
-            return matmul(self.h_eigenbasis(), self.h_log_raw * sqrt(self.h_eigenvalues()))
+            return matmul(self.h_eigenbasis(), self.h_log_raw * self.h_sigma * sqrt(self.h_eigenvalues()))
         elif (self.h_basis == "eigenbasis" and (basis == "eigenbasis_scaled")):
-            return self.h_log_raw / sqrt(self.h_eigenvalues())
+            return self.h_log_raw / (self.h_sigma * sqrt(self.h_eigenvalues()))
         elif (self.h_basis == "eigenbasis_scaled" and (basis == "eigenbasis")):
-            return self.h_log_raw * sqrt(self.h_eigenvalues())
+            return self.h_log_raw * self.h_sigma * sqrt(self.h_eigenvalues())
         elif self.h_basis == basis:
             return self.h_log_raw
         else:
@@ -407,8 +412,10 @@ class VelocityModel(nn.Module):
             s = exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2)))
         elif self.h_basis == "eigenbasis":
             s = diagflat(self.h_eigenvalues())
-        elif self.h_basis == "eigenbasis_scaled":
+        elif self.h_basis == "eigenbasis_scaled" and include_sigma:
             s = diagflat(ones_like(self.h_eigenvalues()))
+        elif self.h_basis == "eigenbasis_scaled" and not include_sigma:
+            s = diagflat(ones_like(self.h_eigenvalues()) / (self.h_sigma ** 2))
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
         return (self.h_sigma ** 2) * s if include_sigma else s
@@ -423,8 +430,10 @@ class VelocityModel(nn.Module):
             s = einsum("ij,j,kj->ik", self.h_eigenbasis(), dtensor([1.0]) / self.h_eigenvalues(), self.h_eigenbasis())
         elif self.h_basis == "eigenbasis":
             s = diagflat(dtensor([1.0]) / self.h_eigenvalues())
-        elif self.h_basis == "eigenbasis_scaled":
+        elif self.h_basis == "eigenbasis_scaled" and include_sigma:
             s = diagflat(ones_like(self.h_eigenvalues()))
+        elif self.h_basis == "eigenbasis_scaled" and not include_sigma:
+            s = diagflat(ones_like(self.h_eigenvalues()) * (self.h_sigma ** 2))
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
         return s / (self.h_sigma ** 2) if include_sigma else s
@@ -489,7 +498,7 @@ class VelocityModel(nn.Module):
         # to the squared-distance from the mean)
         self.update_h_cov_eig()
         r = self.h_prior_prefactor if hyperparameter_dependence else 0
-        r += 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2) / (self.h_sigma ** 2)
+        r += 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2)
         return r
 
     def prior_glog(self, hyperparameter_dependence):
