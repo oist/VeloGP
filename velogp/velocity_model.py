@@ -56,7 +56,9 @@ class VelocityModel(nn.Module):
             # Growth rate
             self.growthrate = dtensor([1/3600], requires_grad=False)
             # Baseline velocity
-            self.v0 = dtensor([100.0])
+            self.v0_scaled = dtensor([1.0])
+            self.v0_prefactor = dtensor([500.0])
+            self.v0_prefactor.requires_grad = False
             # Gaussian process hyperparameters
             self.h_timescale = tensor([1e2], requires_grad=False)
             self.h_sigma = tensor([1.0], requires_grad=False)
@@ -117,8 +119,8 @@ class VelocityModel(nn.Module):
         # updates are forbidding while auto-grad is active, but that's OK, this
         # function should be called *before* the model is evaluated.
         with no_grad():
-            assert all(isfinite(self.v0))
-            self.v0.clamp_(0.0, math.inf)
+            assert all(isfinite(self.v0_scaled))
+            self.v0_scaled.clamp_(0.0, math.inf)
             assert all(isfinite(self.delay))
             self.delay.clamp_(0.0, math.inf)
             assert all(isfinite(self.g_log))
@@ -145,6 +147,15 @@ class VelocityModel(nn.Module):
         :return: v_t(t) as a tensor of the same shape as t
         """
         return self.v0 * self.h(t)
+
+    @property
+    def v0(self):
+        return self.v0_scaled * self.v0_prefactor
+
+    @v0.setter
+    def v0(self, value: Tensor):
+        assert((value.dim() == 1) and (value.size()[0] == 1))
+        self.v0_scaled[0] = value / self.v0_prefactor
 
     def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[int, int]) -> Tensor:
         assert "h_log_raw" in pmap
@@ -516,9 +527,7 @@ class VelocityModel(nn.Module):
             raise ValueError("Invalid basis " + basis)
 
     def prior(self, parameter, hyperparameter_dependence):
-        if parameter is self.v0:
-            return 0
-        elif parameter is self.delay:
+        if parameter is self.v0_scaled:
             return 0
         elif parameter is self.h_log_raw:
             return self.prior_hlog(hyperparameter_dependence=hyperparameter_dependence)

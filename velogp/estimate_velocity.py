@@ -40,7 +40,7 @@ class FitVelocityModel:
         return s
 
     def parameter_posterior_cov_inv(self):
-        params = [self.model.v0, self.model.g_log, self.model.h_log_raw]
+        params = [self.model.v0_scaled, self.model.g_log, self.model.h_log_raw]
         dM, pmap = self.loss.jacobian(params)
         # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
         u = einsum("ji,j,jk->ik", dM, self.loss.weights, dM).clone()
@@ -111,13 +111,14 @@ class FitVelocityModel:
             origin_v[i] = self.model.growthrate / k
             origin_loga0[i] = log_a0
         self.model.delay[:] = (max(origin_loga0) - origin_loga0) / self.model.growthrate
-        self.model.v0[0] = mean(origin_v)
+        self.model.v0_prefactor[0] = mean(origin_v)
+        self.model.v0_scaled[0] = 1.0
         # II. Optimize g()
-        self.model.v0 = nn.Parameter(self.model.v0)
+        self.model.v0_scaled = nn.Parameter(self.model.v0_scaled)
         self.model.g_log = nn.Parameter(self.model.g_log)
-        optimize_v0_g = self.run_lbfgs([ self.model.v0, self.model.g_log ])
+        optimize_v0_g = self.run_lbfgs([ self.model.v0_scaled, self.model.g_log ])
         # III. Optimize h()
         self.model.h_switch_basis("eigenbasis")
         self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
-        optimize_v0_g_h = self.run_lbfgs([ self.model.v0, self.model.g_log, self.model.h_log_raw ])
+        optimize_v0_g_h = self.run_lbfgs([ self.model.v0_scaled, self.model.g_log, self.model.h_log_raw ])
         return (optimize_v0_g.state_dict(), optimize_v0_g_h.state_dict())
