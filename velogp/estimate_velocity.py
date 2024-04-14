@@ -2,6 +2,7 @@ from typing import Any, Dict, Optional, Union, Tuple
 import operator
 from functools import reduce
 from velocity_model import VelocityModel, VelocityModelLoss, dtensor
+import sys
 import math
 import numpy as np
 import torch
