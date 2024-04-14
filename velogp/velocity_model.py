@@ -162,6 +162,7 @@ class VelocityModel(nn.Module):
         i, l = pmap["h_log_raw"], numel(self.h_log_raw)
         pc = posterior_cov[i:(i + l), i:(i + l)]
 
+        # TODO: Take the uncertainty of v0 into account as well!
         return self.v0 * self.h_posterior_stderr(t, pc)
 
 
