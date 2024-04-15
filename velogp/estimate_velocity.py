@@ -33,7 +33,6 @@ class FitVelocityModel:
     def evaluate_model_for_parameters(self, params, update_gradients=True):
         # If any parameter is nan, return nan
         if not reduce(operator.and_, [all(isfinite(p)) for p in params]):
-            print("WARNING: some parameters are NaN, returning NaN", file=sys.stderr)
             return torch.tensor([math.nan])
         # Clamp parameters to their domain before each iteration
         self.model.clamp_parameters()
