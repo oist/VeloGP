@@ -106,18 +106,45 @@ class FitVelocityModel:
     def run_lbfgs(self, params, lr_start=0.1, lr_end=0.1, iterations=100,
                   log_steps=False, log_iterations=False, log_params=False, **kwargs):
         K = 10
+        RETRY = 5
         lossfn = self.parameter_loss_function(params, log_loss_default=log_iterations,
                                               log_params_default=log_params and log_iterations)
         for i in range(K):
+            # Determine current learning rate
+            lr = lr_start + (lr_end - lr_start) * i / (K - 1)
+            # Log step
             if log_steps:
-                print(f"Step {i+1} of {K}")
+                print(f"Step {i+1} of {K}, learning rate {lr}")
+            # Update loss scale
             with no_grad():
                 if log_steps:
                     print("Before step:")
                 self.loss_prefactor[0] *= lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps)[0]
-            opt = optim.LBFGS(params, lr=lr_start + (lr_end - lr_start) * i / (K-1),
-                              max_iter=int(iterations / K), max_eval=10 * iterations, **kwargs)
-            opt.step(lossfn)
+            # Save parameter values
+            fm = self.model.flatmap(params)
+            p_before = self.model.pvector(params, fm)
+            # Perform step, retry with reduced learning rate if we fail
+            j = 0
+            while True:
+                # Increase attempt count
+                j += 1
+                # Create and run optimizer
+                opt = optim.LBFGS(params, lr=lr, max_iter=int(iterations / K), max_eval=10 * iterations, **kwargs)
+                opt.step(lossfn)
+                # If the parameter are still finite, the step was successfull
+                if all(isfinite(self.model.pvector(params, fm))):
+                    break
+                # Otherwise, reset parameters
+                with no_grad():
+                    self.model.pvector_assign(params, p_before, fm)
+                # and complain if the number of retries is exceeded
+                if j >= RETRY:
+                    raise RuntimeError("optimization failed")
+                # otherwise and half the learning rate, then try again
+                lr = lr / 2
+                if log_steps:
+                    print(f"Step {i+1} of {K} failed, will make attempt {j+1} with learning rate reduced to {lr}")
+            # Log number of interations done
             if log_steps:
                 print(f"Iterations: {opt.state_dict()['state'][0]['n_iter']}")
         # Make sure the final values lie within the parameter's domains
