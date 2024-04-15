@@ -140,7 +140,7 @@ class VelocityModel(nn.Module):
             assert all(isfinite(self.h_log_raw))
             self.h_log_raw.clamp_(-5 * h_log_raw_scale, 5 * h_log_raw_scale)
 
-    def flatmap(self, params):
+    def flatmap(self, params: List[nn.Parameter]):
         # Resolve parameter names
         names = {}
         for name, param in self.named_parameters():
@@ -150,7 +150,7 @@ class VelocityModel(nn.Module):
         pmap = { names[id(pi)]: ci for (ci, pi) in zip(c[:-1], params) }
         return c, pmap
 
-    def pvector(self, params, fm = None):
+    def pvector(self, params: List[nn.Parameter], fm = None):
         if fm is None:
             c, pmap = self.flatmap(params)
         else:
@@ -161,7 +161,18 @@ class VelocityModel(nn.Module):
             g[ci:(ci + ni)] = pi
         return g
 
-    def pgradient(self, params, fm = None):
+    def pvector_assign(self, params: List[nn.Parameter], values : Tensor, fm = None):
+        if fm is None:
+            c, pmap = self.flatmap(params)
+        else:
+            c, pmap = fm
+        assert(values.dim() == 1 and values.size(0) == c[-1])
+        for (ci, pi) in zip(c[:-1], params):
+            ni = numel(pi)
+            pi[:] = values[ci:(ci + ni)]
+
+
+    def pgradient(self, params: List[nn.Parameter], fm = None):
         if fm is None:
             c, pmap = self.flatmap(params)
         else:
