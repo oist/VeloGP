@@ -180,6 +180,14 @@ class FitVelocityModel:
             self.model.v0_prefactor[0] = mean(origin_v)
             self.model.v0_scaled[0] = 1.0
         # II. Optimize g()
+        # We first optimize v0 and the spatial delays since these are easier to fit.
+        # We start with a small learning rate because L-BGFS is otherwise prone to making
+        # too large steps in the beginning, which causes numerical issues (infinite values e.g.)
+        # when the model is evaluated. Once the solution improves, the L-BGFS is usually able
+        # to find a good step size on its own, so we slowly increase the learning rate towards
+        # it's default of 1.0, which means the step size suggested by L-BGFS's line search.
+        # We only do 100 iterations because we don't need a perfect solution, just a good
+        # starting point for the next step.
         if log_phases:
             print("Optimizing v0 and g()")
         self.model.v0_scaled = nn.Parameter(self.model.v0_scaled)
@@ -189,6 +197,18 @@ class FitVelocityModel:
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         # III. Optimize h()
+        # Next we make a first optimization pass for h() were we keep v0 and g()
+        # fixed, and find a rough fit for h(). We do this in the scaled eigenbasis
+        # where the prior on h() simply amounts to the sum-of-squares of coefficients.
+        # The advantage of the scaled basis over the normalized basis (in which the
+        # basis vectors have length one) is that it makes the magnitudes of the gradients
+        # more uniform. In the normalized basis, the basis vectors with small eigenvectors
+        # (i.e. small variances) produce large gradients, because even small changes
+        # drastically change the prior on h(). We again start with a small learning rate, for
+        # the same reason as above. This might not be necessary here since we should start with
+        # a reasonably good solution, but it's safer and doesn't hurt much. We again do 100
+        # iterations because we don't need a perfect solution, just a good starting point for the
+        # final step.
         if log_phases:
             print("Optimizing h()")
         self.model.h_switch_basis("eigenbasis_scaled")
@@ -198,6 +218,10 @@ class FitVelocityModel:
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         # IV. Optimize all parameters
+        # Now that we should have a good starting point, we optimize all parameters
+        # together. Starting with a small learning rate is probably unnecessary here, but
+        # again seems safer. We now do 1000 iterations which is hopefully enough to converge.
+        # Note that for lack of a good test, we currently don't check for convergence...
         if log_phases:
             print("Optimizing v0, g() and h() simultaneously")
         self.run_lbfgs([ self.model.v0_scaled, self.model.g_log, self.model.h_log_raw ],
