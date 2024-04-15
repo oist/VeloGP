@@ -54,25 +54,26 @@ class FitVelocityModel:
             l.backward()
         return l
 
-    def parameter_posterior_cov_inv(self):
+    def parameter_posterior_cov_inv(self, ignore_priors=False):
         params = [self.model.v0_scaled, self.model.g_log, self.model.h_log_raw]
         _, pmap = self.model.flatmap(params)
         dM = self.loss.jacobian(params)
         # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
         u = einsum("ji,j,jk->ik", dM, self.loss.weights, dM).clone()
-        # Add Sigma_h^-1 for h_log_raw, which has a GP prior
-        # We do this by querying the parameter map to find the
-        # sub-matrix of u that corresponds to the parameter h_log_raw,
-        # and adding the inverse of its prior covariance matrix
-        i, l = pmap["h_log_raw"], numel(self.model.h_log_raw)
-        u[i:(i+l), i:(i+l)] += self.model.h_cov_inv(include_sigma=True)
-        # Add prior for g_log
-        i, l = pmap["g_log"], numel(self.model.g_log)
-        u[i:(i+l), i:(i+l)] += 1.0 / self.model.g_sigma ** 2
+        if not ignore_priors:
+            # Add Sigma_h^-1 for h_log_raw, which has a GP prior
+            # We do this by querying the parameter map to find the
+            # sub-matrix of u that corresponds to the parameter h_log_raw,
+            # and adding the inverse of its prior covariance matrix
+            i, l = pmap["h_log_raw"], numel(self.model.h_log_raw)
+            u[i:(i+l), i:(i+l)] += self.model.h_cov_inv(include_sigma=True)
+            # Add prior for g_log
+            i, l = pmap["g_log"], numel(self.model.g_log)
+            u[i:(i+l), i:(i+l)] += 1.0 / self.model.g_sigma ** 2
         return u, pmap
 
-    def parameter_posterior_cov(self):
-        u, pmap = self.parameter_posterior_cov_inv()
+    def parameter_posterior_cov(self,ignore_priors=False):
+        u, pmap = self.parameter_posterior_cov_inv(ignore_priors)
         eb = VelocityModel.Eigenbasis.make(u)
         uinv = einsum("ij,j,kj->ik", eb.eigenvectors, tensor([1.0]) / eb.eigenvalues, eb.eigenvectors)
         return uinv, pmap
