@@ -17,7 +17,7 @@ class VelocityModel(nn.Module):
     int32_min : int = -2**31
     int32_max : int = 2**31 - 1
 
-    H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-12
+    H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-8
 
     @dataclass
     class Eigenbasis:
