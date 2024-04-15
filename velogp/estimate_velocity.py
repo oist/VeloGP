@@ -15,7 +15,7 @@ class FitVelocityModel:
         self.model = model
         self.loss = loss
 
-    def parameter_loss_function(self, params):
+    def parameter_loss_function(self, params, log=False):
         def s():
             # If any parameter is nan, return nan
             if not reduce(operator.and_, [ all(isfinite(p)) for p in params ]):
@@ -33,10 +33,11 @@ class FitVelocityModel:
             # Compute loss
             l = self.loss() + reduce(operator.add, [self.model.prior(p, False) for p in params])
             l.backward()
-#            for n, p in self.model.named_parameters():
-#                print(f"{n}: {p}")
-#                print(f"grad {n}: {p.grad}")
-#            print(f"loss: {l}")
+            if log:
+                for n, p in self.model.named_parameters():
+                    print(f"{n}: {p}")
+                    print(f"grad {n}: {p.grad}")
+                print(f"loss: {l}")
             return l
         return s
 
@@ -87,15 +88,27 @@ class FitVelocityModel:
             loss_function()
             optimizer.step()
 
-    def run_lbfgs(self, params):
-        opt = optim.LBFGS(params, lr=0.01, max_iter=500, max_eval=10000,
-                          tolerance_change=-math.inf, line_search_fn="strong_wolfe")
+    def run_lbfgs(self, params, lr_start=0.1, lr_end=0.1, iterations=100, **kwargs):
+        K = 10
+        opt = optim.LBFGS(params, lr=lr_start, max_iter=int(iterations/K),
+                          max_eval=10*iterations, **kwargs)
         loss = self.parameter_loss_function(params)
-        for i in range(10):
+        for i in range(K):
+            opt.param_groups[0]["lr"] = lr_start + (lr_end - lr_start) * i / (K-1)
             opt.step(loss)
         # Make sure the final values lie within the parameter's domains
         self.model.clamp_parameters()
         return opt
+
+    def run_sgd(self, params, lr_start=0.1, lr_end=0.1, iterations=100, **kwargs):
+        opt = optim.SGD(params, lr=lr_start, **kwargs)
+        loss = self.parameter_loss_function(params, log=True)
+        for i in range(iterations):
+            opt.param_groups[0]["lr"] = lr_start + (lr_end - lr_start) * i / (iterations-1)
+            print(opt.param_groups[0]["lr"])
+            loss()
+            opt.step()
+
 
     def optimize_parameters(self):
         self.model.h_switch_basis("canonical")
@@ -111,15 +124,23 @@ class FitVelocityModel:
             k, log_a0 = self.local_fit(self.model.origins[i], 200000)
             origin_v[i] = self.model.growthrate / k
             origin_loga0[i] = log_a0
-        self.model.delay[:] = (max(origin_loga0) - origin_loga0) / self.model.growthrate
-        self.model.v0_prefactor[0] = mean(origin_v)
-        self.model.v0_scaled[0] = 1.0
+        with no_grad():
+            self.model.delay[:] = (max(origin_loga0) - origin_loga0) / self.model.growthrate
+            self.model.v0_prefactor[0] = mean(origin_v)
+            self.model.v0_scaled[0] = 1.0
         # II. Optimize g()
         self.model.v0_scaled = nn.Parameter(self.model.v0_scaled)
         self.model.g_log = nn.Parameter(self.model.g_log)
-        optimize_v0_g = self.run_lbfgs([ self.model.v0_scaled, self.model.g_log ])
+        self.run_lbfgs([self.model.v0_scaled, self.model.g_log],
+                       lr_start=0.1, lr_end=1.0, iterations=100,
+                       tolerance_change=-math.inf, line_search_fn="strong_wolfe")
         # III. Optimize h()
         self.model.h_switch_basis("eigenbasis_scaled")
         self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
-        optimize_v0_g_h = self.run_lbfgs([ self.model.v0_scaled, self.model.g_log, self.model.h_log_raw ])
-        return (optimize_v0_g.state_dict(), optimize_v0_g_h.state_dict())
+        self.run_lbfgs([ self.model.v0_scaled, self.model.h_log_raw ],
+                       lr_start=0.1, lr_end=1.0, iterations=100,
+                       tolerance_change=-math.inf, line_search_fn="strong_wolfe")
+        # IV. Optimize all parameters
+        self.run_lbfgs([ self.model.v0_scaled, self.model.g_log, self.model.h_log_raw ],
+                       lr_start=1.0, lr_end=0.01, iterations=1000,
+                       tolerance_change=-math.inf, line_search_fn="strong_wolfe")
