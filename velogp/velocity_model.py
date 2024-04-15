@@ -17,7 +17,7 @@ class VelocityModel(nn.Module):
     int32_min : int = -2**31
     int32_max : int = 2**31 - 1
 
-    H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-8
+    H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-12
 
     @dataclass
     class Eigenbasis:
@@ -140,6 +140,38 @@ class VelocityModel(nn.Module):
             assert all(isfinite(self.h_log_raw))
             self.h_log_raw.clamp_(-5 * h_log_raw_scale, 5 * h_log_raw_scale)
 
+    def flatmap(self, params):
+        # Resolve parameter names
+        names = {}
+        for name, param in self.named_parameters():
+            names[id(param)] = name
+        # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i
+        c = [0] + np.cumsum([ numel(p) for i, p in enumerate(params) ]).tolist()
+        pmap = { names[id(pi)]: ci for (ci, pi) in zip(c[:-1], params) }
+        return c, pmap
+
+    def pvector(self, params, fm = None):
+        if fm is None:
+            c, pmap = self.flatmap(params)
+        else:
+            c, pmap = fm
+        g = zeros(Size([c[-1]]), dtype=torch.float64)
+        for (ci, pi) in zip(c[:-1], params):
+            ni = numel(pi)
+            g[ci:(ci + ni)] = pi
+        return g
+
+    def pgradient(self, params, fm = None):
+        if fm is None:
+            c, pmap = self.flatmap(params)
+        else:
+            c, pmap = fm
+        g = zeros(Size([c[-1]]), dtype=torch.float64)
+        for (ci, pi) in zip(c[:-1], params):
+            ni = numel(pi)
+            g[ci:(ci + ni)] = pi.grad
+        return g
+
     def v_t(self, t: Tensor) -> Tensor:
         """Evaluates v_t(t) = v0 * h(t) at the specified points t
 
@@ -164,7 +196,6 @@ class VelocityModel(nn.Module):
 
         # TODO: Take the uncertainty of v0 into account as well!
         return self.v0 * self.h_posterior_stderr(t, pc)
-
 
     def h_indices(self, t: Tensor) -> Tensor:
         assert all(t >= self.h_tgrid[0])
@@ -581,14 +612,9 @@ class VelocityModelLoss(nn.Module):
         return 0.5 * sum(self.weights * ((self.y_obs - self.y_pred()) ** 2))
 
     def jacobian(self, params: List[nn.Parameter]) -> Tuple[Tensor, Dict[str, nn.Parameter]]:
-        # Resolve parameter names
-        names = {}
-        for name, param in self.model.named_parameters():
-            names[id(param)] = name
         # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i of the
         # jacobian, where n_i is the number of elements of the i-th parameter tensor
-        c = [0] + np.cumsum([ numel(p) for i, p in enumerate(params) ]).tolist()
-        pmap = { names[id(pi)]: ci for (ci, pi) in zip(c[:-1], params) }
+        c, pmap = self.model.flatmap(params)
         # Evaluate model for all locations to find scaling factor
         _, scale = self.abundance_and_scale()
         # Prepare output matrix
@@ -603,8 +629,5 @@ class VelocityModelLoss(nn.Module):
             # Evaluate model at position x_i and compute gradients
             y_pred = scale * self.model(self.x[k])
             y_pred.backward(inputs=params, retain_graph=True)
-            # Copy gradients into the k-th row of the jacobian
-            for (ci, pi) in zip(c[:-1], params):
-                ni = numel(pi)
-                J[k, ci:(ci+ni)] = reshape(pi.grad, Size([ni]))
-        return J, pmap
+            J[k, :] = self.model.pgradient(params, (c, pmap))
+        return J

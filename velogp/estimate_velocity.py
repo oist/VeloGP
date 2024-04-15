@@ -14,36 +14,51 @@ class FitVelocityModel:
     def __init__(self, model: VelocityModel, loss: VelocityModelLoss):
         self.model = model
         self.loss = loss
+        self.loss_prefactor = dtensor([1.0])
+        self.loss_prefactor.requires_grad = False
 
-    def parameter_loss_function(self, params, log=False):
-        def s():
-            # If any parameter is nan, return nan
-            if not reduce(operator.and_, [ all(isfinite(p)) for p in params ]):
-                print("WARNING: some parameters are NaN, returning NaN", file=sys.stderr)
-                return torch.tensor([math.nan])
-            # Clamp parameters to their domain before each iteration
-            self.model.clamp_parameters()
-            # Evaluate loss and gradients
-            with no_grad():
-                self.model.update_h_cov_eig()
-            # Zero gradients
-            for p in params:
-                if p.grad is not None:
-                    p.grad.zero_()
-            # Compute loss
-            l = self.loss() + reduce(operator.add, [self.model.prior(p, False) for p in params])
-            l.backward()
-            if log:
+    def parameter_loss_function(self, params, log_params_default=False, log_loss_default=False):
+        def s(update_gradients=True, log_params=log_params_default, log_loss=log_loss_default):
+            l = self.evaluate_model_for_parameters(params, update_gradients=update_gradients)
+            if log_params:
                 for n, p in self.model.named_parameters():
                     print(f"{n}: {p}")
                     print(f"grad {n}: {p.grad}")
-                print(f"loss: {l}")
+            if log_loss:
+                    print(f"loss_prefactor: {self.loss_prefactor}")
+                    print(f"loss (scaled): {l}")
             return l
         return s
 
+    def evaluate_model_for_parameters(self, params, update_gradients=True):
+        # If any parameter is nan, return nan
+        if not reduce(operator.and_, [all(isfinite(p)) for p in params]):
+            print("WARNING: some parameters are NaN, returning NaN", file=sys.stderr)
+            return torch.tensor([math.nan])
+        # Clamp parameters to their domain before each iteration
+        self.model.clamp_parameters()
+        # Evaluate loss and gradients
+        # Update eigenbasis for current hyperparameters in a no-grad context,
+        # this avoids doing the update in an autograd context later which is
+        # unnecessary and could cause problems
+        with no_grad():
+            self.model.update_h_cov_eig()
+        # Zero gradients
+        if update_gradients:
+            for p in params:
+                if p.grad is not None:
+                    p.grad.zero_()
+        # Compute loss
+        l = (self.loss() + reduce(operator.add, [self.model.prior(p, False) for p in params])) / self.loss_prefactor
+        # Compute gradients
+        if update_gradients:
+            l.backward()
+        return l
+
     def parameter_posterior_cov_inv(self):
         params = [self.model.v0_scaled, self.model.g_log, self.model.h_log_raw]
-        dM, pmap = self.loss.jacobian(params)
+        _, pmap = self.model.flatmap(params)
+        dM = self.loss.jacobian(params)
         # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
         u = einsum("ji,j,jk->ik", dM, self.loss.weights, dM).clone()
         # Add Sigma_h^-1 for h_log_raw, which has a GP prior
@@ -88,14 +103,23 @@ class FitVelocityModel:
             loss_function()
             optimizer.step()
 
-    def run_lbfgs(self, params, lr_start=0.1, lr_end=0.1, iterations=100, **kwargs):
+    def run_lbfgs(self, params, lr_start=0.1, lr_end=0.1, iterations=100,
+                  log_steps=False, log_iterations=False, log_params=False, **kwargs):
         K = 10
-        opt = optim.LBFGS(params, lr=lr_start, max_iter=int(iterations/K),
-                          max_eval=10*iterations, **kwargs)
-        loss = self.parameter_loss_function(params)
+        lossfn = self.parameter_loss_function(params, log_loss_default=log_iterations,
+                                              log_params_default=log_params and log_iterations)
         for i in range(K):
-            opt.param_groups[0]["lr"] = lr_start + (lr_end - lr_start) * i / (K-1)
-            opt.step(loss)
+            if log_steps:
+                print(f"Step {i+1} of {K}")
+            with no_grad():
+                if log_steps:
+                    print("Before step:")
+                self.loss_prefactor[0] *= lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps)[0]
+            opt = optim.LBFGS(params, lr=lr_start + (lr_end - lr_start) * i / (K-1),
+                              max_iter=int(iterations / K), max_eval=10 * iterations, **kwargs)
+            opt.step(lossfn)
+            if log_steps:
+                print(f"Iterations: {opt.state_dict()['state'][0]['n_iter']}")
         # Make sure the final values lie within the parameter's domains
         self.model.clamp_parameters()
         return opt
@@ -110,7 +134,7 @@ class FitVelocityModel:
             opt.step()
 
 
-    def optimize_parameters(self):
+    def optimize_parameters(self, log_phases=False, log_steps=False, log_iterations=False, log_params=False):
         self.model.h_switch_basis("canonical")
         # I. Find origin delays
         # Fit A(d) = A(o) * exp(- k * |d|) where k = lambda/v locally. Then
@@ -129,18 +153,27 @@ class FitVelocityModel:
             self.model.v0_prefactor[0] = mean(origin_v)
             self.model.v0_scaled[0] = 1.0
         # II. Optimize g()
+        if log_phases:
+            print("Optimizing v0 and g()")
         self.model.v0_scaled = nn.Parameter(self.model.v0_scaled)
         self.model.g_log = nn.Parameter(self.model.g_log)
         self.run_lbfgs([self.model.v0_scaled, self.model.g_log],
                        lr_start=0.1, lr_end=1.0, iterations=100,
-                       tolerance_change=-math.inf, line_search_fn="strong_wolfe")
+                       tolerance_change=-math.inf, line_search_fn="strong_wolfe",
+                       log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         # III. Optimize h()
+        if log_phases:
+            print("Optimizing h()")
         self.model.h_switch_basis("eigenbasis_scaled")
         self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
         self.run_lbfgs([ self.model.v0_scaled, self.model.h_log_raw ],
                        lr_start=0.1, lr_end=1.0, iterations=100,
-                       tolerance_change=-math.inf, line_search_fn="strong_wolfe")
+                       tolerance_change=-math.inf, line_search_fn="strong_wolfe",
+                       log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         # IV. Optimize all parameters
+        if log_phases:
+            print("Optimizing v0, g() and h() simultaneously")
         self.run_lbfgs([ self.model.v0_scaled, self.model.g_log, self.model.h_log_raw ],
-                       lr_start=1.0, lr_end=0.01, iterations=1000,
-                       tolerance_change=-math.inf, line_search_fn="strong_wolfe")
+                       lr_start=0.1, lr_end=1.0, iterations=1000,
+                       tolerance_change=-math.inf, line_search_fn="strong_wolfe",
+                       log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
