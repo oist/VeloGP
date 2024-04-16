@@ -194,7 +194,8 @@ class VelocityModel(nn.Module):
         g = zeros(Size([c[-1]]), dtype=torch.float64)
         for (ci, pi) in zip(c[:-1], params):
             ni = numel(pi)
-            g[ci:(ci + ni)] = pi.grad
+            if pi.grad is not None:
+                g[ci:(ci + ni)] = pi.grad
         return g
 
     def v_t(self, t: Tensor) -> Tensor:
