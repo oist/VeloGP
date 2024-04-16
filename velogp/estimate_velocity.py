@@ -98,11 +98,6 @@ class FitVelocityModel:
             raise RuntimeError(f"no local maximum around origin at {origin}")
         return dtensor(k), dtensor(log_a0)
 
-    def optimizer_loop(self, loss_function, optimizer, steps=10000):
-        for i in range(steps):
-            loss_function()
-            optimizer.step()
-
     def run_lbfgs(self, params, lr_start=0.1, lr_end=0.1, iterations=100,
                   log_steps=False, log_iterations=False, log_params=False, **kwargs):
         K = 10
@@ -151,13 +146,13 @@ class FitVelocityModel:
         self.model.clamp_parameters()
         return opt
 
-    def run_sgd(self, params, lr_start=0.1, lr_end=0.1, iterations=100, **kwargs):
-        opt = optim.SGD(params, lr=lr_start, **kwargs)
-        loss = self.parameter_loss_function(params, log=True)
+    def run_sgd(self, params, lr_start=0.001, lr_end=0.001, iterations=1000,
+                log_steps=False, log_iterations=False, log_params=False, **kwargs):
+        lossfn = self.parameter_loss_function(params, log_loss_default=log_iterations,
+                                              log_params_default=log_params and log_iterations)
         for i in range(iterations):
-            opt.param_groups[0]["lr"] = lr_start + (lr_end - lr_start) * i / (iterations-1)
-            print(opt.param_groups[0]["lr"])
-            loss()
+            opt = optim.SGD(params, lr=lr_start + (lr_end - lr_start) * i / (iterations-1), **kwargs)
+            lossfn()
             opt.step()
 
 
