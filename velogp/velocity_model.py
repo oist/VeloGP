@@ -47,7 +47,8 @@ class VelocityModel(nn.Module):
         origin_index_left: Tensor
         origin_index_right: Tensor
 
-    def __init__(self, genome_length: int, is_circular: bool, origins: IntTensor, h_tgrid: DoubleTensor, g_xranges_l: IntTensor, g_xranges_u: IntTensor):
+    def __init__(self, genome_length: int, is_circular: bool, origins: IntTensor, h_tgrid: DoubleTensor,
+                 g_xranges_l: IntTensor, g_xranges_u: IntTensor, g_delays: DoubleTensor | None = None):
         super().__init__()
         with no_grad():
             # Genome
@@ -112,6 +113,19 @@ class VelocityModel(nn.Module):
             self.g_xgrid_len = cat((self.g_xgrid[1:], dtensor([genome_length]))) - self.g_xgrid
             self.g_xgrid_len.requires_grad = False
             self.g_log = zeros(self.g_xranges_l.size(), dtype=torch.double)
+            # If provided, g_delays specifies for each g range, the magnitudes of the expected delays,
+            # measured relative to the time a single replisome would take to replicate the genome.
+            # Without g_delay, g_log[i] == 1.0 means e=2.71 - fold decrease in velocity within that range.
+            # With g_delay, g_log[i] = 1.0 means the velocity is decreased such that a delay of
+            # g_delay[i] * genome_length / v0 is incurred over the whole length of the g range.
+            if g_delays is None:
+                self.g_log_prefactor = ones_like(self.g_log)
+            else:
+                # Check that
+                assert (g_delays.dim() == 1) and (g_delays.size() == self.g_xranges_l.size())
+                g_xranges_l = self.g_xranges_u - self.g_xranges_l
+                self.g_log_prefactor = log(dtensor([1.0]) + self.genome_length * g_delays / g_xranges_l)
+            self.g_log_prefactor.requires_grad = False
 
     def clamp_parameters(self):
         # We must update parameters in-place since optimizes identify parameters
@@ -312,7 +326,8 @@ class VelocityModel(nn.Module):
             # Tensor containing the length of the intersection of [0, t[j]] and [h_tgrid[i], h_tgrid[i+1]]
             c = maximum(zeros, minimum(dist, length))
         # Create vector of values of g(x) at the grid points g_xgrid
-        g_log_inczero = cat((dtensor([0.0]), flatten(stack((self.g_log, zeros_like(self.g_log)), dim=1))))
+        g_log_inczero = cat((dtensor([0.0]), flatten(stack((self.g_log * self.g_log_prefactor,
+                                                            zeros_like(self.g_log)), dim=1))))
         # G(x[j]) = sum_i g[i] * c[i,j]
         return sum(c * exp(g_log_inczero[(...,) + (None,) * x.dim()]), dim=0)
 
