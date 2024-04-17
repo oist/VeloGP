@@ -5,12 +5,15 @@ import math
 import re
 from dataclasses import dataclass
 import argparse
+import pickle
 import gzip
+import bz2
 import BCBio.GFF
 import Bio.SeqIO
 import numpy as np
 import pandas as pd
 import torch as pt
+import matplotlib.pyplot as pp
 
 import velocity_model
 import estimate_velocity
@@ -25,6 +28,14 @@ class SplitAndAdd(argparse.Action):
         for vs in values:
             for v in vs.split(","):
                 getattr(namespace, self.dest, set()).add(v)
+
+def open_file(filename, mode):
+    if filename.endswith(".gz"):
+        return gzip.open(filename, mode)
+    elif filename.endswith(".bz2"):
+        return bz2.open(filename, mode)
+    else:
+        return open(filename, mode)
 
 @dataclass
 class Feature:
@@ -47,6 +58,20 @@ parser = argparse.ArgumentParser(
 
 parser.add_argument("inputfile",
                     help="abundance table")
+parser.add_argument("--out-model", metavar="filename",
+                    help="output file for the fitted model")
+parser.add_argument("--out-all", metavar="filename",
+                    help="output file for the loss function, fit algorithm and fitted model")
+parser.add_argument("--out-vt", metavar="filename",
+                    help="output file for the velocity as a function of time as a tab-separated table")
+parser.add_argument("--out-vx", metavar="filename",
+                    help="output file for the delays incurred at each v(x) feature")
+parser.add_argument("--out-stats", metavar="filename",
+                    help="output file for fitting statistics")
+parser.add_argument("--plot-fit", metavar="filename",
+                    help="output file for a plot of the input abundances and fitted model")
+parser.add_argument("--plot-vt", metavar="filename",
+                    help="output file for a plot of the velocity as a function of time")
 parser.add_argument("--growthrate", default=1.0, type=float, metavar="lambda",
                     help="growthrate of sequenced population [1/hour]")
 parser.add_argument("--origins", default={"oriC"}, metavar="origin,origin,...", action=SplitAndAdd,
@@ -63,9 +88,9 @@ parser.add_argument("--vx-delay", type=float, default=0.05, metavar="",
                     help="delay we can roughly expect to be incurred at a single vx feature in units of genome replication time")
 parser.add_argument("--vx-magnitude", type=float, default=1.0, metavar="",
                     help="magnitude of deviations from expected delays at vx features (standard deviation of exponent)")
-parser.add_argument("--vx-feature-names", default=set(), nargs="+", metavar="feature,feature,...", action=SplitAndAdd,
+parser.add_argument("--vx-feature-names", default=set(), metavar="feature,feature,...", action=SplitAndAdd,
                     help="add these features to list of sites at which the velocity is modulated")
-parser.add_argument("--vx-feature-types", default=set(), nargs="+", metavar="type,type,...", action=SplitAndAdd,
+parser.add_argument("--vx-feature-types", default=set(), metavar="type,type,...", action=SplitAndAdd,
                     help="add all features with these types to list of sites at which the velocity is modulated")
 parser.add_argument("--gff", default=[], metavar="gff-file", action="append",
                     help="GFF file containing genome annotations (may be compressed)")
@@ -94,10 +119,7 @@ COLUMNS = {
 
 # Read genome to find chromosome names and lengths
 CHROMOSOME_LENGTHS : Dict[str, int] = {}
-if ARGS.genome.endswith(".gz"):
-    fasta_file = gzip.open(ARGS.genome, "rt")
-else:
-    fasta_file = open(ARGS.genome, "rt")
+fasta_file = open_file(ARGS.genome, "rt")
 try:
     for seq in Bio.SeqIO.parse(fasta_file, "fasta"):
         CHROMOSOME_LENGTHS[seq.id] = len(seq)
@@ -133,10 +155,7 @@ VX_FEATURE_NAMES_TO_BE_RESOLVED : Set[str] = set(ARGS.vx_feature_names)
 
 # Read GFF files
 for gff_filename in ARGS.gff:
-    if gff_filename.endswith(".gz"):
-        gff_file = gzip.open(gff_filename, "rt")
-    else:
-        gff_file = open(gff_filename, "rt")
+    gff_file = open_file(gff_filename, "rt")
     try:
         # Recursively iterate through features in the GFF file
         # (NOTE: It's silly that we have to do this since GFF files are actually
@@ -196,10 +215,7 @@ for gff_filename in ARGS.gff:
 
 # Read BED files
 for bed_filename in ARGS.bed:
-    if bed_filename.endswith(".gz"):
-        bed_file = gzip.open(bed_filename, "rt")
-    else:
-        bed_file = open(bed_filename, "rt")
+    bed_file = open_file(bed_filename, "rt")
     for line in bed_file:
         fields = [ f.strip() for f in line.split("\t") ]
         if len(fields) < 4:
@@ -286,9 +302,10 @@ LOSS = velocity_model.VelocityModelLoss(
     model=MODEL)
 
 # Create fit instance
-FIT = estimate_velocity.FitVelocityModel(MODEL, LOSS)
+ALG = estimate_velocity.FitVelocityModel(MODEL, LOSS)
 
 # Print summary of settings
+print("*** SETTINGS")
 print("Genome configuration:")
 for chr, l in CHROMOSOME_LENGTHS.items():
     print(f"  chromosome {chr}: {l}bp")
@@ -308,7 +325,105 @@ print("Data:")
 print(f"  data points: {len(ABUNDANCE)} ({100.0*len(ABUNDANCE)/ABUNDANCE_ROWS_PREFILTER:.0f}% of {ABUNDANCE_ROWS_PREFILTER} points pre-filtering)")
 
 # Estimate parameters
-FIT.optimize_parameters(log_phases=True)
+print("*** FITTING MODEL")
+ALG.optimize_parameters(log_phases=True)
 
 # Compute posterior covariances of parameters
-POSTERIOR = FIT.parameter_posterior_cov()
+print("*** COMPUTING POSTERIOR DISTRIBUTION")
+COV, COV_PMAP = ALG.parameter_posterior_cov()
+
+# Save results
+print("*** SAVING RESULTS")
+
+# Save fitted model
+if ARGS.out_model is not None:
+    print(f"Saving fitted model to {ARGS.out_model}")
+    try:
+        pt.save(MODEL, ARGS.out_model)
+    except Exception as e:
+        print(f"ERROR: Failed to save {ARGS.out_model}: {e}")
+
+# Save all results
+if ARGS.out_all is not None:
+    print(f"Saving fitting algorithm, loss function, fitted model and posterior covariances to {ARGS.out_all}")
+    f = None
+    try:
+        f = open_file(ARGS.out_all, "wb+")
+        obj = {"model": MODEL, "cov": COV, "cov.pmap": COV_PMAP,
+               "loss": LOSS, "algorithm": ALG}
+        pickle.dump(obj, f)
+    except Exception as e:
+        print(f"ERROR: Failed to save {ARGS.out_all}: {e}")
+    finally:
+        if f is not None:
+            f.close()
+
+# Save v(t)
+if ARGS.out_vt is not None:
+    print(f"Saving v(t) to {ARGS.out_vt}")
+    f = None
+    try:
+        # Build table
+        cols = [('t', np.float64), ('vt', np.float64), ('vt_stderr', np.float64)]
+        fmt = ('%.5f', '%.5f', '%.5f')
+        tab = np.zeros(MODEL.h_tgrid.shape[0], dtype=cols)
+        tab["t"] = MODEL.h_tgrid
+        tab["vt"] = MODEL.v_t(MODEL.h_tgrid)
+        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV, COV_PMAP)
+        # Write tab-separated to output file
+        f = open_file(ARGS.out_vt, "wt+")
+        f.write("\t".join([name for (name, type) in cols]) + "\n")
+        np.savetxt(f, tab, delimiter="\t", fmt=fmt)
+    except Exception as e:
+        print(f"ERROR: Failed to save {ARGS.out_all}: {e}")
+    finally:
+        if f is not None:
+            f.close()
+
+# Save v(x), i.e. delays incurred at various genomic features
+if ARGS.out_vx is not None:
+    raise ArgumentError("Saving v(x) is not yet implemented")
+
+# Save fitting statistics
+if ARGS.out_stats is not None:
+    raise ArgumentError("Saving stats is not yet implemented")
+
+# Plot v(t)
+if ARGS.plot_vt is not None:
+    try:
+        print(f"Plotting v(t) to {ARGS.plot_vt}")
+        with pt.no_grad():
+            x_min = LOSS.x[pt.argmin(LOSS.y_pred())]
+            t_fin = MODEL.Hinv(MODEL.T(x_min))
+            t_max = max(t_fin, DOUBLINGTIME) * 1.2
+
+            plot_t = MODEL.h_tgrid
+            plot_vt = MODEL.v_t(MODEL.h_tgrid)
+            plot_vt_stderr = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV, COV_PMAP)
+            plot_yrange = [pt.min(plot_vt[plot_t <= t_fin]).item(), pt.max(plot_vt[plot_t <= t_fin]).item()]
+
+        pp.clf()
+        pp.figure(figsize=(2.5, 2.0))
+        pp.ylim(plot_yrange)
+        pp.axhline(y=MODEL.v0.detach(), linestyle="dotted", color="black", linewidth=0.5)
+        pp.step(plot_t / DOUBLINGTIME, plot_vt, linewidth=0.5, color="navy")
+        pp.fill_between(plot_t / DOUBLINGTIME, plot_vt - 2 * plot_vt_stderr, plot_vt + 2 * plot_vt_stderr, color="lightblue")
+        pp.axvline(x=1.0, linestyle="dashed", color="black", linewidth=0.5)
+        pp.axvline(x=t_fin / DOUBLINGTIME, linestyle="solid", color="black", linewidth=0.5)
+        pp.tight_layout()
+        pp.savefig(ARGS.plot_vt, dpi=300, bbox_inches='tight')
+    except Exception as e:
+        print(f"ERROR: Failed to save {ARGS.plot_vt}: {e}")
+
+# Plot abundance data and fitted model
+if ARGS.plot_fit is not None:
+    try:
+        print(f"Plotting data and fitted model to {ARGS.plot_fit}")
+        pp.clf()
+        pp.figure(figsize=(2.5, 2.0))
+        pp.plot(LOSS.x, LOSS.y_obs, marker="x", markersize=0.25, linestyle="", color="grey")
+        pp.plot(LOSS.x, LOSS.y_pred().detach(), linewidth=0.5, color="navy")
+        pp.tight_layout()
+        pp.savefig(ARGS.plot_fit, dpi=300, bbox_inches='tight')
+    except Exception as e:
+        print(f"ERROR: Failed to save {ARGS.plot_fit}: {e}")
