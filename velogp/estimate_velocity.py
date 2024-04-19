@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Union, Tuple
+from typing import Any, Dict, Optional, Union, Tuple, List
 import operator
 from functools import reduce
 from velocity_model import VelocityModel, VelocityModelLoss, dtensor
@@ -18,7 +18,7 @@ class FitVelocityModel:
         self.loss_prefactor.requires_grad = False
         self.optimized_parameters = []
 
-    def parameter_loss_function(self, params, log_params_default=False, log_loss_default=False):
+    def parameter_loss_function(self, params: List[nn.Parameter], log_params_default=False, log_loss_default=False):
         def s(update_gradients=True, log_params=log_params_default, log_loss=log_loss_default):
             l = self.evaluate_model_for_parameters(params, update_gradients=update_gradients)
             if log_params:
@@ -31,7 +31,7 @@ class FitVelocityModel:
             return l
         return s
 
-    def evaluate_model_for_parameters(self, params, update_gradients=True):
+    def evaluate_model_for_parameters(self, params: List[nn.Parameter], update_gradients=True):
         # If any parameter is nan, return nan
         if not reduce(operator.and_, [all(isfinite(p)) for p in params]):
             return torch.tensor([math.nan])
@@ -108,7 +108,7 @@ class FitVelocityModel:
             raise RuntimeError(f"no local maximum around origin at {origin}")
         return dtensor(k), dtensor(log_a0)
 
-    def run_lbfgs(self, params, lr_start=0.1, lr_end=0.1, iterations=100,
+    def run_lbfgs(self, params: List[nn.Parameter], lr_start=0.1, lr_end=0.1, iterations=100,
                   log_steps=False, log_iterations=False, log_params=False, **kwargs):
         K = 10
         RETRY = 5
@@ -156,7 +156,7 @@ class FitVelocityModel:
         self.model.clamp_parameters()
         return opt
 
-    def run_sgd(self, params, lr_start=0.001, lr_end=0.001, iterations=1000,
+    def run_sgd(self, params: List[nn.Parameter], lr_start=0.001, lr_end=0.001, iterations=1000,
                 log_steps=False, log_iterations=False, log_params=False, **kwargs):
         lossfn = self.parameter_loss_function(params, log_loss_default=log_iterations,
                                               log_params_default=log_params and log_iterations)
