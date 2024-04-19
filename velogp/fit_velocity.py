@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 from typing import Dict, List, Set
 
+import io
+import sys
 import math
 import re
 from dataclasses import dataclass
@@ -50,6 +52,9 @@ class Origin:
     chr: str
     pos: int
     name : str
+
+# Make output unbuffered
+sys.stdout = io.TextIOWrapper(open(sys.stdout.fileno(), 'wb', 0), write_through=True)
 
 # Argument handling
 parser = argparse.ArgumentParser(
