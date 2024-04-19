@@ -316,11 +316,11 @@ for chr, l in CHROMOSOME_LENGTHS.items():
     print(f"  chromosome {chr}: {l}bp")
     origins = [f"{o.pos+1} ({o.name})" for o in ORIGINS if o.chr == chr]
     print(f"    origins: {', '.join(origins)}")
-    print(f"    sites with spatial velocity modulation:")
+    print(f"    allow for spatial velocity modulation at:")
     for f in [f for f in VX_FEATURES if f.chr == chr]:
-        print(f"      {f.begin+1}-{f.end+1} ({f.name}): {f.end-f.begin}bp, delay {f.delayscale}")
+        print(f"      {f.begin+1}-{f.end+1} ({f.name}): {f.end-f.begin}bp, delayscale {f.delayscale}")
 
-print("Parameters:")
+print(f"Parameters:")
 print(f"  growth rate: {ARGS.growthrate} [1/h]")
 print(f"  v(t) timescale: {MODEL.h_timescale[0]:.0f} [s] (= {ARGS.vt_timescale} doublingtimes)")
 print(f"  log v(t) std. err: {ARGS.vt_magnitude}")
