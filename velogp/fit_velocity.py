@@ -84,8 +84,8 @@ parser.add_argument("--vt-resolution", type=int, default=100, metavar="points",
                     help="number of points per timescale to use to represent v(t)")
 parser.add_argument("--vt-tmax", type=float, default=3, metavar="tmax",
                     help="maximum time t for which to estimate v(t)")
-parser.add_argument("--vx-delayscale", type=float, default=0.1, metavar="",
-                    help="delay we can roughly expect to be incurred at a single vx feature in units of genome replication time")
+parser.add_argument("--vx-delayscale", type=float, default=0.01, metavar="",
+                    help="delay we can roughly expect to be incurred at a single vx feature as a fraction of total replication time")
 parser.add_argument("--vx-feature-names", default=set(), metavar="feature,feature,...", action=SplitAndAdd,
                     help="add these features to list of sites at which the velocity is modulated")
 parser.add_argument("--vx-feature-types", default=set(), metavar="type,type,...", action=SplitAndAdd,
