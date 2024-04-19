@@ -434,7 +434,7 @@ if ARGS.plot_vt is not None:
             plot_t = MODEL.h_tgrid
             plot_vt = MODEL.v_t(MODEL.h_tgrid).detach()
             plot_vt_stderr = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV, COV_PMAP).detach()
-            plot_yrange = [pt.min(plot_vt[plot_t <= t_fin]).item(), pt.max(plot_vt[plot_t <= t_fin]).item()]
+            plot_yrange = [0.8 * pt.min(plot_vt[plot_t <= t_fin]).item(), pt.max(plot_vt[plot_t <= t_fin]).item() * 1.2]
 
         pp.clf()
         pp.figure(figsize=(2.5, 2.0))
