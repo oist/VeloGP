@@ -450,6 +450,8 @@ if ARGS.plot_vt is not None:
         pp.savefig(ARGS.plot_vt, dpi=300, bbox_inches='tight')
     except Exception as e:
         print(f"ERROR: Failed to save {ARGS.plot_vt}: {e}")
+    finally:
+        pass
 
 # Plot abundance data and fitted model
 if ARGS.plot_fit is not None:
@@ -463,3 +465,5 @@ if ARGS.plot_fit is not None:
         pp.savefig(ARGS.plot_fit, dpi=300, bbox_inches='tight')
     except Exception as e:
         print(f"ERROR: Failed to save {ARGS.plot_fit}: {e}")
+    finally:
+        pass
