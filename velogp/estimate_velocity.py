@@ -1,5 +1,6 @@
 from typing import Any, Dict, Optional, Union, Tuple, List
 import operator
+import builtins
 from functools import reduce
 from velocity_model import VelocityModel, VelocityModelLoss, dtensor
 import sys
@@ -23,8 +24,9 @@ class FitVelocityModel:
             l = self.evaluate_model_for_parameters(params, update_gradients=update_gradients)
             if log_params:
                 for n, p in self.model.named_parameters():
-                    print(f"{n}: {p}")
-                    print(f"grad {n}: {p.grad}")
+                    if builtins.any([ id(p) == id(pp) for pp in params ]):
+                        print(f"{n}: {p.detach()}")
+                        print(f"grad {n}: {p.grad}")
             if log_loss:
                     print(f"loss_prefactor: {self.loss_prefactor}")
                     print(f"loss (scaled): {l}")
