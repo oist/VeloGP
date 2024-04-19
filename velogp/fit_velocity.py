@@ -380,14 +380,43 @@ if ARGS.out_vt is not None:
         f.write("\t".join([name for (name, type) in cols]) + "\n")
         np.savetxt(f, tab, delimiter="\t", fmt=fmt)
     except Exception as e:
-        print(f"ERROR: Failed to save {ARGS.out_all}: {e}")
+        print(f"ERROR: Failed to save {ARGS.out_vt}: {e}")
     finally:
         if f is not None:
             f.close()
 
 # Save v(x), i.e. delays incurred at various genomic features
 if ARGS.out_vx is not None:
-    raise ArgumentError("Saving v(x) is not yet implemented")
+    print(f"Saving v(x) to {ARGS.out_vx}")
+    f = None
+    try:
+        # Check that we agree on the order of the genomic features...
+        assert all(MODEL.g_xranges_l == pt.tensor(list([f.begin for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME]), dtype=pt.int32))
+        # Build table
+        slen = max([ len(f.chr) for f in VX_FEATURES ])
+        cols = [ ('chr', f'U{slen}'), ('begin', np.int32), ('end', np.int32), ('length', np.int32), ('delayscale', np.float64),
+                 ('g', np.float64), ('v_bps', np.float64), ('delay_rel', np.float64), ('delay_s', np.float64) ]
+        fmt = ('%s', '%d', '%d', '%d', '%.2f', '%.5f', '%.5f', '%.5f', '%.5f')
+        tab = np.zeros(MODEL.g_delta.shape[0], dtype=cols)
+        features = list([f for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME])
+        tab["chr"] = [f.chr for f in features ]
+        tab["begin"] = [f.begin for f in features ]
+        tab["end"] = [f.end for f in features ]
+        tab["length"] = [f.end - f.begin for f in features ]
+        tab["delayscale"] = [f.delayscale for f in features ]
+        tab["g"] = MODEL.g.detach().numpy()
+        tab["v_bps"] = MODEL.v0.detach().numpy() / MODEL.g.detach().numpy()
+        tab["delay_rel"] = MODEL.g_delta.detach().numpy() * MODEL.g_xranges_len.detach().numpy()
+        tab["delay_s"] = MODEL.g_delta.detach().numpy() * MODEL.g_xranges_len.detach().numpy() / MODEL.v0.detach().numpy()
+        # Write tab-separated to output file
+        f = open_file(ARGS.out_vx, "wt+")
+        f.write("\t".join([name for (name, type) in cols]) + "\n")
+        np.savetxt(f, tab, delimiter="\t", fmt=fmt)
+    except Exception as e:
+        print(f"ERROR: Failed to save {ARGS.out_all}: {e}")
+    finally:
+        if f is not None:
+            f.close()
 
 # Save fitting statistics
 if ARGS.out_stats is not None:
