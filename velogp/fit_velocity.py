@@ -439,11 +439,13 @@ if ARGS.plot_vt is not None:
         pp.clf()
         pp.figure(figsize=(2.5, 2.0))
         pp.ylim(plot_yrange)
-        pp.axhline(y=MODEL.v0.detach(), linestyle="dotted", color="black", linewidth=0.5)
-        pp.step(plot_t / DOUBLINGTIME, plot_vt, linewidth=0.5, color="navy")
-        pp.fill_between(plot_t / DOUBLINGTIME, plot_vt - 2 * plot_vt_stderr, plot_vt + 2 * plot_vt_stderr, color="lightblue")
+        pp.axhline(y=MODEL.v0.detach().numpy(), linestyle="dotted", color="black", linewidth=0.5)
+        pp.step(plot_t.numpy() / DOUBLINGTIME, plot_vt.numpy(), linewidth=0.5, color="navy")
+        pp.fill_between(plot_t.numpy() / DOUBLINGTIME,
+                        plot_vt.numpy() - 2 * plot_vt_stderr.numpy(), plot_vt.numpy() + 2 * plot_vt_stderr.numpy(),
+                        color="lightblue")
         pp.axvline(x=1.0, linestyle="dashed", color="black", linewidth=0.5)
-        pp.axvline(x=t_fin / DOUBLINGTIME, linestyle="solid", color="black", linewidth=0.5)
+        pp.axvline(x=t_fin.numpy() / DOUBLINGTIME, linestyle="solid", color="black", linewidth=0.5)
         pp.tight_layout()
         pp.savefig(ARGS.plot_vt, dpi=300, bbox_inches='tight')
     except Exception as e:
@@ -455,8 +457,8 @@ if ARGS.plot_fit is not None:
         print(f"Plotting data and fitted model to {ARGS.plot_fit}")
         pp.clf()
         pp.figure(figsize=(2.5, 2.0))
-        pp.plot(LOSS.x, LOSS.y_obs, marker="x", markersize=0.25, linestyle="", color="grey")
-        pp.plot(LOSS.x, LOSS.y_pred().detach(), linewidth=0.5, color="navy")
+        pp.plot(LOSS.x.detach().numpy(), LOSS.y_obs.detach().numpy(), marker="x", markersize=0.25, linestyle="", color="grey")
+        pp.plot(LOSS.x.detach().numpy(), LOSS.y_pred().detach().numpy(), linewidth=0.5, color="navy")
         pp.tight_layout()
         pp.savefig(ARGS.plot_fit, dpi=300, bbox_inches='tight')
     except Exception as e:
