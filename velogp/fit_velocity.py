@@ -311,13 +311,13 @@ for chr, l in CHROMOSOME_LENGTHS.items():
     print(f"    origins: {', '.join(origins)}")
     print(f"    sites with spatial velocity modulation:")
     for f in [f for f in VX_FEATURES if f.chr == chr]:
-        print(f"      {f.begin+1}-{f.end+1} ({f.name}): {f.end-f.begin}bp, delay {f.delay}")
+        print(f"      {f.begin+1}-{f.end+1} ({f.name}): {f.end-f.begin}bp, delay {f.delayscale}")
 
 print("Parameters:")
 print(f"  growth rate: {ARGS.growthrate} [1/h]")
 print(f"  v(t) timescale: {MODEL.h_timescale[0]:.0f} [s] (= {ARGS.vt_timescale} doublingtimes)")
 print(f"  log v(t) std. err: {ARGS.vt_magnitude}")
-print(f"  log v(x) : {ARGS.vt_magnitude}")
+print(f"  v(x) delay scale: {ARGS.vx_delayscale}")
 
 print("Data:")
 print(f"  data points: {len(ABUNDANCE)} ({100.0*len(ABUNDANCE)/ABUNDANCE_ROWS_PREFILTER:.0f}% of {ABUNDANCE_ROWS_PREFILTER} points pre-filtering)")
