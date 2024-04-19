@@ -366,8 +366,8 @@ if ARGS.out_vt is not None:
         fmt = ('%.5f', '%.5f', '%.5f')
         tab = np.zeros(MODEL.h_tgrid.shape[0], dtype=cols)
         tab["t"] = MODEL.h_tgrid
-        tab["vt"] = MODEL.v_t(MODEL.h_tgrid)
-        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV, COV_PMAP)
+        tab["vt"] = MODEL.v_t(MODEL.h_tgrid).detach()
+        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV, COV_PMAP).detach()
         # Write tab-separated to output file
         f = open_file(ARGS.out_vt, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
@@ -396,8 +396,8 @@ if ARGS.plot_vt is not None:
             t_max = max(t_fin, DOUBLINGTIME) * 1.2
 
             plot_t = MODEL.h_tgrid
-            plot_vt = MODEL.v_t(MODEL.h_tgrid)
-            plot_vt_stderr = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV, COV_PMAP)
+            plot_vt = MODEL.v_t(MODEL.h_tgrid).detach()
+            plot_vt_stderr = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV, COV_PMAP).detach()
             plot_yrange = [pt.min(plot_vt[plot_t <= t_fin]).item(), pt.max(plot_vt[plot_t <= t_fin]).item()]
 
         pp.clf()
