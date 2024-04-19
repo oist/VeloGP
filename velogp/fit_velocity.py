@@ -99,6 +99,8 @@ parser.add_argument("--genome", required=True, metavar="fasta-file",
                     help="FASTA file containing the reference genome (may be compressed)")
 parser.add_argument("--columns", default="seq,midpoint,coverage_ratio,coverage_ratio_stderr,ratio_mappable",
                     help="comma-separated names of columns containing chromosome, position, abundance, std.error of abundance and validity")
+parser.add_argument("--cores", type=int,
+                    help="number of cores to use (default: autodetect)")
 
 # Parse arguments
 ARGS = parser.parse_args()
@@ -114,6 +116,10 @@ COLUMNS = {
     "s_obs": ARGS.columns[3],
     "valid": ARGS.columns[4],
 }
+
+# Set number of cores to user
+if ARGS.cores is not None:
+    pt.set_num_threads(int(ARGS.cores))
 
 # Read genome to find chromosome names and lengths
 CHROMOSOME_LENGTHS : Dict[str, int] = {}
@@ -303,8 +309,9 @@ LOSS = velocity_model.VelocityModelLoss(
 ALG = estimate_velocity.FitVelocityModel(MODEL, LOSS)
 
 # Print summary of settings
-print("*** SETTINGS")
-print("Genome configuration:")
+print(f"*** SETTINGS")
+print(f"Number of cores: {pt.get_num_threads()}")
+print(f"Genome configuration:")
 for chr, l in CHROMOSOME_LENGTHS.items():
     print(f"  chromosome {chr}: {l}bp")
     origins = [f"{o.pos+1} ({o.name})" for o in ORIGINS if o.chr == chr]
