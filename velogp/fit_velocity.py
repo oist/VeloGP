@@ -42,7 +42,7 @@ class Feature:
     chr: str
     begin: int
     end: int
-    delay: float
+    delayscale: float
     name: str
 
 @dataclass
@@ -84,10 +84,8 @@ parser.add_argument("--vt-resolution", type=int, default=100, metavar="points",
                     help="number of points per timescale to use to represent v(t)")
 parser.add_argument("--vt-tmax", type=float, default=3, metavar="tmax",
                     help="maximum time t for which to estimate v(t)")
-parser.add_argument("--vx-delay", type=float, default=0.05, metavar="",
+parser.add_argument("--vx-delayscale", type=float, default=0.1, metavar="",
                     help="delay we can roughly expect to be incurred at a single vx feature in units of genome replication time")
-parser.add_argument("--vx-magnitude", type=float, default=1.0, metavar="",
-                    help="magnitude of deviations from expected delays at vx features (standard deviation of exponent)")
 parser.add_argument("--vx-feature-names", default=set(), metavar="feature,feature,...", action=SplitAndAdd,
                     help="add these features to list of sites at which the velocity is modulated")
 parser.add_argument("--vx-feature-types", default=set(), metavar="type,type,...", action=SplitAndAdd,
@@ -189,7 +187,7 @@ for gff_filename in ARGS.gff:
                     # translates this into zero-based, non-inclusive ranges, so we use them as-is.
                     feature = Feature(chr=seq, begin=int(f.location.start), end=int(f.location.end),
                                       name=f_matching_feature_names[0] if len(f_matching_feature_names) > 0 else f_names[0],
-                                      delay=ARGS.vx_delay)
+                                      delayscale=ARGS.vx_delayscale)
                     # Make sure min < max
                     if feature.begin > feature.end:
                         feature.begin, feature.end = feature.end, feature.begin
@@ -228,7 +226,7 @@ for bed_filename in ARGS.bed:
                 raise ArgumentError(f"feature name {name} is ambiguous")
             # Create feature
             # NOTE: Position in BED files are zero-based, end is not included in the range
-            feature = Feature(chr=chr, begin=start, end=end, name=name, delay=ARGS.vx_delay)
+            feature = Feature(chr=chr, begin=start, end=end, name=name, delayscale=ARGS.vx_delayscale)
             # Make sure min < max
             if feature.begin > feature.end:
                 feature.begin, feature.end = feature.end, feature.begin
@@ -287,11 +285,11 @@ MODEL = velocity_model.VelocityModel(
                          step=DOUBLINGTIME * ARGS.vt_timescale / ARGS.vt_resolution,
                          dtype=pt.float64),
     g_xranges_l=pt.tensor([f.begin for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.int32),
-    g_xranges_u=pt.tensor([f.end for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.int32)
+    g_xranges_u=pt.tensor([f.end for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.int32),
+    g_delayscale=pt.tensor([f.delayscale for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.float64)
 )
 MODEL.growthrate[0] = ARGS.growthrate / 3600
 MODEL.h_sigma[0] = ARGS.vt_magnitude
-MODEL.g_sigma[0] = ARGS.vx_magnitude
 MODEL.h_timescale[0] = DOUBLINGTIME * ARGS.vt_timescale
 
 # Create loss function

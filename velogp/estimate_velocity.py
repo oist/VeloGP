@@ -16,6 +16,7 @@ class FitVelocityModel:
         self.loss = loss
         self.loss_prefactor = dtensor([1.0])
         self.loss_prefactor.requires_grad = False
+        self.optimized_parameters = []
 
     def parameter_loss_function(self, params, log_params_default=False, log_loss_default=False):
         def s(update_gradients=True, log_params=log_params_default, log_loss=log_loss_default):
@@ -48,16 +49,21 @@ class FitVelocityModel:
                 if p.grad is not None:
                     p.grad.zero_()
         # Compute loss
-        l = (self.loss() + reduce(operator.add, [self.model.prior(p, False) for p in params])) / self.loss_prefactor
+        try:
+            l = (self.loss() + reduce(operator.add, [self.model.prior(p, False) for p in params])) / self.loss_prefactor
+        except Exception as e:
+            print("ERROR: Model evaluation failed, current parameter values are:", file=sys.stderr)
+            for n, p in self.model.named_parameters():
+                print(f"Parameter {n}: {p}", file=sys.stderr)
+            raise e
         # Compute gradients
         if update_gradients:
             l.backward()
         return l
 
     def parameter_posterior_cov_inv(self, ignore_priors=False):
-        params = [self.model.v0_scaled, self.model.g_log, self.model.h_log_raw]
-        _, pmap = self.model.flatmap(params)
-        dM = self.loss.jacobian(params)
+        _, pmap = self.model.flatmap(self.optimized_parameters)
+        dM = self.loss.jacobian(self.optimized_parameters)
         # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
         u = einsum("ji,j,jk->ik", dM, self.loss.weights, dM).clone()
         if not ignore_priors:
@@ -65,11 +71,15 @@ class FitVelocityModel:
             # We do this by querying the parameter map to find the
             # sub-matrix of u that corresponds to the parameter h_log_raw,
             # and adding the inverse of its prior covariance matrix
-            i, l = pmap["h_log_raw"], numel(self.model.h_log_raw)
-            u[i:(i+l), i:(i+l)] += self.model.h_cov_inv(include_sigma=True)
-            # Add prior for g_log
-            i, l = pmap["g_log"], numel(self.model.g_log)
-            u[i:(i+l), i:(i+l)] += 1.0 / self.model.g_sigma ** 2
+            if "h_log_raw" in pmap:
+                i, l = pmap["h_log_raw"], numel(self.model.h_log_raw)
+                u[i:(i+l), i:(i+l)] += self.model.h_cov_inv(include_sigma=True)
+            # Add prior for g_delta
+            # NOTE: This is only a very rough approximation since the prior
+            # on g_delta IS NOT Gaussian.
+            if "g_delta_scaled" in pmap:
+                i, l = pmap["g_delta_scaled"], numel(self.model.g_delta_scaled)
+                u[i:(i+l), i:(i+l)] += diagflat(dtensor([1.0]) / self.model.g_delta_prefactor ** 2)
         return u, pmap
 
     def parameter_posterior_cov(self,ignore_priors=False):
@@ -186,11 +196,13 @@ class FitVelocityModel:
         if log_phases:
             print("Optimizing v0 and g()")
         self.model.v0_scaled = nn.Parameter(self.model.v0_scaled)
-        self.model.g_log = nn.Parameter(self.model.g_log)
-        self.run_lbfgs([self.model.v0_scaled, self.model.g_log],
+        self.model.g_delta_scaled = nn.Parameter(self.model.g_delta_scaled)
+        self.run_lbfgs([self.model.v0_scaled, self.model.g_delta_scaled],
                        lr_start=0.1, lr_end=1.0, iterations=100,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
+        self.optimized_parameters.append(self.model.v0_scaled)
+        self.optimized_parameters.append(self.model.g_delta_scaled)
         # III. Optimize h()
         # Next we make a first optimization pass for h() were we keep v0 and g()
         # fixed, and find a rough fit for h(). We do this in the scaled eigenbasis
@@ -212,6 +224,7 @@ class FitVelocityModel:
                        lr_start=0.1, lr_end=1.0, iterations=100,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
+        self.optimized_parameters.append(self.model.h_log_raw)
         # IV. Optimize all parameters
         # Now that we should have a good starting point, we optimize all parameters
         # together. Starting with a small learning rate is probably unnecessary here, but
@@ -219,7 +232,7 @@ class FitVelocityModel:
         # Note that for lack of a good test, we currently don't check for convergence...
         if log_phases:
             print("Optimizing v0, g() and h() simultaneously")
-        self.run_lbfgs([ self.model.v0_scaled, self.model.g_log, self.model.h_log_raw ],
+        self.run_lbfgs([ self.model.v0_scaled, self.model.g_delta_scaled, self.model.h_log_raw ],
                        lr_start=0.1, lr_end=1.0, iterations=1000,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)

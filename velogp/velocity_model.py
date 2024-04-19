@@ -48,7 +48,7 @@ class VelocityModel(nn.Module):
         origin_index_right: Tensor
 
     def __init__(self, genome_length: int, is_circular: bool, origins: IntTensor, h_tgrid: DoubleTensor,
-                 g_xranges_l: IntTensor, g_xranges_u: IntTensor, g_delays: DoubleTensor | None = None):
+                 g_xranges_l: IntTensor, g_xranges_u: IntTensor, g_delayscale: DoubleTensor | None = None):
         super().__init__()
         with no_grad():
             # Genome
@@ -93,8 +93,6 @@ class VelocityModel(nn.Module):
                 self.origins_augmented.requires_grad = False
             # Replication delayys
             self.delay = zeros_like(self.origins, dtype=torch.double)
-            # Spatial effects hyperparameters
-            self.g_sigma = tensor([1.0], requires_grad=False)
             # Intervals on which g(x) differs from 1.0
             self.g_xranges_l = g_xranges_l
             self.g_xranges_u = g_xranges_u
@@ -107,25 +105,23 @@ class VelocityModel(nn.Module):
             # Check that g_xranges_l[i] < g_xranges_u[i] <= g_xranges_l[i+1]
             assert all(self.g_xranges_l < self.g_xranges_u).detach().item()
             assert all(self.g_xranges_u <= cat((self.g_xranges_l[1:], dtensor([float('inf')])))).detach().item()
-            # Grid on which g(x) is defined, derived from g_xranges_l, g_xranges_u
+            self.g_xranges_len = self.g_xranges_u - self.g_xranges_l
+            # Grid on which g(x) is defined, i.e. the grid
+            # [ l_1, u_1, l_2, u_2, .... ] where l = from g_xranges_l, u = g_xranges_u
             self.g_xgrid = cat((tensor([0]), flatten(stack((self.g_xranges_l, self.g_xranges_u), dim=1))))
             self.g_xgrid.requires_grad = False
             self.g_xgrid_len = cat((self.g_xgrid[1:], dtensor([genome_length]))) - self.g_xgrid
             self.g_xgrid_len.requires_grad = False
-            self.g_log = zeros(self.g_xranges_l.size(), dtype=torch.double)
-            # If provided, g_delays specifies for each g range, the magnitudes of the expected delays,
+            self.g_delta_scaled = zeros(self.g_xranges_l.size(), dtype=torch.float64)
+            # If provided, g_delayscale specifies for each g range, the magnitudes of the expected delays,
             # measured relative to the time a single replisome would take to replicate the genome.
-            # Without g_delay, g_log[i] == 1.0 means e=2.71 - fold decrease in velocity within that range.
-            # With g_delay, g_log[i] = 1.0 means the velocity is decreased such that a delay of
-            # g_delay[i] * genome_length / v0 is incurred over the whole length of the g range.
-            if g_delays is None:
-                self.g_log_prefactor = ones_like(self.g_log)
+            if g_delayscale is None:
+                self.g_delta_prefactor = ones_like(self.g_delta_scaled)
             else:
-                # Check that
-                assert (g_delays.dim() == 1) and (g_delays.size() == self.g_xranges_l.size())
-                g_xranges_l = self.g_xranges_u - self.g_xranges_l
-                self.g_log_prefactor = log(dtensor([1.0]) + self.genome_length * g_delays / g_xranges_l)
-            self.g_log_prefactor.requires_grad = False
+                # Check that we have as many delayscales as g ranges
+                assert (g_delayscale.dim() == 1) and (g_delayscale.size() == self.g_xranges_l.size())
+                self.g_delta_prefactor = g_delayscale.double() * self.genome_length.double() / self.g_xranges_len.double()
+            self.g_delta_scaled.requires_grad = False
 
     def clamp_parameters(self):
         # We must update parameters in-place since optimizes identify parameters
@@ -137,8 +133,8 @@ class VelocityModel(nn.Module):
             self.v0_scaled.clamp_(0.0, math.inf)
             assert all(isfinite(self.delay))
             self.delay.clamp_(0.0, math.inf)
-            assert all(isfinite(self.g_log))
-            self.g_log.clamp_(0.0, 10)
+            assert all(isfinite(self.g_delta_scaled))
+            self.g_delta_scaled.clamp_(0.0, 10)
             assert all(isfinite(self.h_timescale))
             self.h_timescale.clamp_(0.0, math.inf)
             assert all(isfinite(self.h_sigma))
@@ -214,6 +210,14 @@ class VelocityModel(nn.Module):
     def v0(self, value: Tensor):
         assert((value.dim() == 1) and (value.size()[0] == 1))
         self.v0_scaled[0] = value / self.v0_prefactor
+
+    @property
+    def g_delta(self):
+        return self.g_delta_scaled * self.g_delta_prefactor
+
+    @property
+    def g(self):
+        return (dtensor([1.0]) + self.g_delta)
 
     def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[int, int]) -> Tensor:
         assert "h_log_raw" in pmap
@@ -327,10 +331,9 @@ class VelocityModel(nn.Module):
             # Tensor containing the length of the intersection of [0, t[j]] and [h_tgrid[i], h_tgrid[i+1]]
             c = maximum(zeros, minimum(dist, length))
         # Create vector of values of g(x) at the grid points g_xgrid
-        g_log_inczero = cat((dtensor([0.0]), flatten(stack((self.g_log * self.g_log_prefactor,
-                                                            zeros_like(self.g_log)), dim=1))))
+        g = cat((dtensor([1.0]), flatten(stack((self.g, ones_like(self.g_delta_scaled)), dim=1))))
         # G(x[j]) = sum_i g[i] * c[i,j]
-        return sum(c * exp(g_log_inczero[(...,) + (None,) * x.dim()]), dim=0)
+        return sum(c * g[(...,) + (None,) * x.dim()], dim=0)
 
     def G(self, x: Tensor, o: Tensor, d: Tensor) -> Tensor:
         """
@@ -560,20 +563,19 @@ class VelocityModel(nn.Module):
         r += 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2)
         return r
 
-    def prior_glog(self, hyperparameter_dependence):
-        """The prior log-probability of self.g_log as a realization of independent Gaussians
+    def prior_gdelta(self, hyperparameter_dependence):
+        """The prior log-probability of self.g_delta as a realization of independent Gaussians
 
-        Returns the negative log-probability (or, rather, log-density) of self.g_log as samples of independent
-        Gaussian distribution with mean zero and covariance self.g_sigma^2
+        Returns the negative log-probability (or, rather, log-density) of self.g_delta as samples of independent
+        Exponential distribution with mean self.g_delta_prefactor. Note that g_delta_scaled = g_delta / g_delta_prefactor
 
-        :param hdependent_only: Whether to return the full density, or only the g_log-dependent terms
+        :param hdependent_only: Whether to return the full density, or only the g_delta-dependent terms
         """
         if hyperparameter_dependence:
-            r = (dtensor([0.5 * math.log(2*math.pi) * len(self.g_log)])
-                 + log(self.g_sigma) * len(self.g_log))
+            r = sum(log(self.g_delta_prefactor))
         else:
             r = 0
-        r += 0.5 * sum(self.g_log ** 2) / (self.g_sigma ** 2)
+        r += sum(abs(self.g_delta_scaled))
         return r
 
 
@@ -599,8 +601,8 @@ class VelocityModel(nn.Module):
             return 0
         elif parameter is self.h_log_raw:
             return self.prior_hlog(hyperparameter_dependence=hyperparameter_dependence)
-        elif parameter is self.g_log:
-            return self.prior_glog(hyperparameter_dependence=hyperparameter_dependence)
+        elif parameter is self.g_delta_scaled:
+            return self.prior_gdelta(hyperparameter_dependence=hyperparameter_dependence)
         else:
             raise RuntimeError("no prior defined for this parameter")
 
