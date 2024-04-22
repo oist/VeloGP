@@ -203,8 +203,8 @@ class FitVelocityModel:
                        lr_start=0.1, lr_end=1.0, iterations=100,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
-        self.optimized_parameters.append(self.model.v0_scaled)
-        self.optimized_parameters.append(self.model.g_delta_scaled)
+        self.optimized_parameters.append("v0_scaled")
+        self.optimized_parameters.append("g_delta_scaled")
         # III. Optimize h()
         # Next we make a first optimization pass for h() were we keep v0 and g()
         # fixed, and find a rough fit for h(). We do this in the scaled eigenbasis
@@ -226,7 +226,7 @@ class FitVelocityModel:
                        lr_start=0.1, lr_end=1.0, iterations=100,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
-        self.optimized_parameters.append(self.model.h_log_raw)
+        self.optimized_parameters.append("h_log_raw")
         # IV. Optimize all parameters
         # Now that we should have a good starting point, we optimize all parameters
         # together. Starting with a small learning rate is probably unnecessary here, but

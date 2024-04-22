@@ -150,45 +150,64 @@ class VelocityModel(nn.Module):
             assert all(isfinite(self.h_log_raw))
             self.h_log_raw.clamp_(-5 * h_log_raw_scale, 5 * h_log_raw_scale)
 
-    def flatmap(self, params: List[nn.Parameter]):
-        # Resolve parameter names
-        names = {}
+    def resolve_params(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]]) -> List[Tuple[str, nn.Parameter]]:
+        # Return unmodified parameter list if it is already resolved
+        if (len(params) == 0) or isinstance(params[0], tuple):
+            return params
+        # Create name map
+        nmap = {}
+        pmap = {}
         for name, param in self.named_parameters():
-            names[id(param)] = name
+            nmap[id(param)] = name
+            pmap[name] = param
+        # Return list of (str, nn.Parameter) tuples
+        r = []
+        for p in params:
+            if isinstance(p, nn.Parameter):
+                r.append((nmap[id(p)], p))
+            else:
+                r.append((p, pmap[p]))
+        return r
+
+    def flatmap(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]]):
+        params = self.resolve_params(params)
         # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i
-        c = [0] + np.cumsum([ numel(p) for i, p in enumerate(params) ]).tolist()
-        pmap = { names[id(pi)]: ci for (ci, pi) in zip(c[:-1], params) }
+        c = [0] + np.cumsum([ numel(p) for i, (n, p) in enumerate(params) ]).tolist()
+        pmap = { ni: ci for (ci, (ni, pi)) in zip(c[:-1], params) }
         return c, pmap
 
-    def pvector(self, params: List[nn.Parameter], fm = None):
+    def pvector(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]], fm = None):
+        params = self.resolve_params(params)
         if fm is None:
             c, pmap = self.flatmap(params)
         else:
             c, pmap = fm
         g = zeros(Size([c[-1]]), dtype=torch.float64)
-        for (ci, pi) in zip(c[:-1], params):
+        for (ci, (ni, pi)) in zip(c[:-1], params):
             ni = numel(pi)
             g[ci:(ci + ni)] = pi
         return g
 
-    def pvector_assign(self, params: List[nn.Parameter], values : Tensor, fm = None):
+    def pvector_assign(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]], values : Tensor, fm = None):
+        params = self.resolve_params(params)
         if fm is None:
             c, pmap = self.flatmap(params)
         else:
             c, pmap = fm
         assert(values.dim() == 1 and values.size(0) == c[-1])
-        for (ci, pi) in zip(c[:-1], params):
+        for (ci, (ni, pi)) in zip(c[:-1], params):
             ni = numel(pi)
             pi[:] = values[ci:(ci + ni)]
 
 
     def pgradient(self, params: List[nn.Parameter], fm = None):
+        params = self.resolve_params(params)
         if fm is None:
             c, pmap = self.flatmap(params)
         else:
             c, pmap = fm
         g = zeros(Size([c[-1]]), dtype=torch.float64)
-        for (ci, pi) in zip(c[:-1], params):
+        for (ci, (ni, pi)) in zip(c[:-1], params):
             ni = numel(pi)
             if pi.grad is not None:
                 g[ci:(ci + ni)] = pi.grad
@@ -640,7 +659,8 @@ class VelocityModelLoss(nn.Module):
     def forward(self) -> Tensor:
         return 0.5 * sum(self.weights * ((self.y_obs - self.y_pred()) ** 2))
 
-    def jacobian(self, params: List[nn.Parameter]) -> Tuple[Tensor, Dict[str, nn.Parameter]]:
+    def jacobian(self, params: List[nn.Parameter | str]) -> Tuple[Tensor, Dict[str, nn.Parameter]]:
+        params = self.model.resolve_params(params)
         # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i of the
         # jacobian, where n_i is the number of elements of the i-th parameter tensor
         c, pmap = self.model.flatmap(params)
@@ -652,11 +672,11 @@ class VelocityModelLoss(nn.Module):
         # Evaluate at locations x_1,..., x_N individually to build jacobian
         for k in builtins.range(0,n):
             # Zero gradients
-            for p in params:
+            for n, p in params:
                 if p.grad is not None:
                     p.grad.zero_()
             # Evaluate model at position x_i and compute gradients
             y_pred = scale * self.model(self.x[k])
-            y_pred.backward(inputs=params, retain_graph=True)
+            y_pred.backward(inputs=[p for n, p in params], retain_graph=True)
             J[k, :] = self.model.pgradient(params, (c, pmap))
         return J
