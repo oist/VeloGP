@@ -148,7 +148,7 @@ class VelocityModel(nn.Module):
                 with no_grad():
                     h_log_raw_scale = dtensor([1.0])
             assert all(isfinite(self.h_log_raw))
-            self.h_log_raw.clamp_(-5 * h_log_raw_scale, 5 * h_log_raw_scale)
+            self.h_log_raw.clamp_(-10 * h_log_raw_scale, 10 * h_log_raw_scale)
 
     def resolve_params(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]]) -> List[Tuple[str, nn.Parameter]]:
         # Return unmodified parameter list if it is already resolved
