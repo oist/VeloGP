@@ -240,3 +240,9 @@ class FitVelocityModel:
                        lr_start=0.1, lr_end=1.0, iterations=1000,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
+        if log_phases:
+            print("Finalizing v0, g() and h() until the object cannot be further improved")
+        self.run_lbfgs([ self.model.v0_scaled, self.model.g_delta_scaled, self.model.h_log_raw ],
+                       lr_start=1.0, lr_end=1.0, iterations=10000,
+                       tolerance_change=1e-8, line_search_fn="strong_wolfe",
+                       log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
