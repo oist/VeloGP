@@ -63,9 +63,11 @@ class FitVelocityModel:
             l.backward()
         return l
 
-    def parameter_posterior_cov_inv(self, ignore_priors=False):
-        _, pmap = self.model.flatmap(self.optimized_parameters)
-        dM = self.loss.jacobian(self.optimized_parameters)
+    def parameter_posterior_cov_inv(self, params=None, ignore_priors=False):
+        if params is None:
+            params = self.optimized_parameters
+        _, pmap = self.model.flatmap(params)
+        dM = self.loss.jacobian(params)
         # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
         u = einsum("ji,j,jk->ik", dM, self.loss.weights, dM).clone()
         if not ignore_priors:
@@ -84,8 +86,8 @@ class FitVelocityModel:
                 u[i:(i+l), i:(i+l)] += diagflat(dtensor([1.0]) / self.model.g_delta_prefactor ** 2)
         return u, pmap
 
-    def parameter_posterior_cov(self,ignore_priors=False):
-        u, pmap = self.parameter_posterior_cov_inv(ignore_priors)
+    def parameter_posterior_cov(self, params=None, ignore_priors=False):
+        u, pmap = self.parameter_posterior_cov_inv(params=params, ignore_priors=ignore_priors)
         eb = VelocityModel.Eigenbasis.make(u)
         uinv = einsum("ij,j,kj->ik", eb.eigenvectors, tensor([1.0]) / eb.eigenvalues, eb.eigenvectors)
         return uinv, pmap
