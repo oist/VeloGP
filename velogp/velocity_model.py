@@ -270,21 +270,29 @@ class VelocityModel(nn.Module):
     def h_posterior_stderr(self, times: Tensor, h_log_raw_posterior_cov: Tensor) -> Tensor:
         assert ((h_log_raw_posterior_cov.dim() == 2) and
                 (h_log_raw_posterior_cov.size() == Size([self.h_log_raw.size()[0], self.h_log_raw.size()[0]])))
+        # We transform the posterior covariance matrix of the parameters into a covariance matrix
+        # for h_log in the canonical basis, then extract the diagonal and take the square root to
+        # get the standard deviations. Note that the covariances between h() at different times t
+        # is lost. We use that if the covariance matrix of y is S, then the covariance matrix of
+        # Ay is A S A^T
         idx = self.h_indices(times)
         if self.h_basis == "canonical":
-            d = sqrt(diagonal(h_log_raw_posterior_cov)[idx])
+            # The posterior covariance matrix is already expressed in the canonical basis
+            d = diagonal(h_log_raw_posterior_cov)
         elif self.h_basis == "eigenbasis":
-            d = sqrt(diagonal(matmul(self.h_eigenbasis(),
-                                     matmul(h_log_raw_posterior_cov,
-                                            t(self.h_eigenbasis()))))[idx])
+            # The posterior covariance matrix S applies to h_log_raw = M^T h_log, see h_switch_basis().
+            # The covariance of h_log = M h_log_raw is therefore M S M^T.
+            d = diagonal(matmul(self.h_eigenbasis(), matmul(h_log_raw_posterior_cov, t(self.h_eigenbasis()))))
         elif self.h_basis == "eigenbasis_scaled":
-            cv = einsum("ij,i,j->ij", h_log_raw_posterior_cov,
-                        sqrt(self.h_eigenvalues()), sqrt(self.h_eigenvalues()))
-            d = self.h_sigma * sqrt(diagonal(matmul(self.h_eigenbasis(),
-                                                    matmul(cv, t(self.h_eigenbasis()))))[idx])
+            # The posterior covariance matrix S applies to h_log_raw = (1/h_sigma^2) L^(-1/2) M^T h_log,
+            # see h_switch_basis() for the definitions of M, L. The covariance of h_log = h_sigma M L^(1/2) h_log_raw
+            # is therefore h_sigma^2 M L^(1/2) * S * L^(1/2) * M^T
+            s = self.h_sigma * sqrt(self.h_eigenvalues())
+            cv = einsum("i,ij,j->ij", s, h_log_raw_posterior_cov, s)
+            d = diagonal(matmul(self.h_eigenbasis(), matmul(cv, t(self.h_eigenbasis()))))
         else:
             raise ValueError("invalid basis " + self.h_basis)
-        return exp(self.h_log("canonical")[idx]) * d
+        return exp(self.h_log("canonical")[idx]) * sqrt(d[idx])
 
     def H(self, t: Tensor) -> Tensor:
         """Evaluates H(t) = int_0^t h(u) du at the specified points t
@@ -429,24 +437,23 @@ class VelocityModel(nn.Module):
     def h_switch_basis(self, newbasis: str):
         """Switch the basis in which h_log is represented
 
-        The represented h_log stays the same, i.e. h_log("canonical") does not change
-        (except for numerical errors). The possible bases are
+        The represented h_log stays the same, i.e. h_log("canonical") does not change (except for numerical error).
 
-        (1) 'canonical'. log(h(t)) is represented by the vector
-            log(h(h_tgrid[1])), ..., log(h(h_tgrid[k]))
+        The different bases are defined in the following way. Let Sigma be the covariance matrix of h_log,
+        i.e. of the vector [ log(h(h_tgrid[1])), ..., log(h(h_tgrid[k])) ]. Let further M be an orthonormal
+        matrix and L=diag(l[1],... , l[n]) be a diagonal matrix such that Sigma = h_sigma^2 M^T L M. The possible
+        bases are then:
 
-        (2) 'eigenbasis'. log(h(t)) is represented by the vector
-            [c1, ..., ck]
-        such that
-            h_sigma * sum_i { c[i] * v[i] } = log(h(h_tgrid[1])), ..., log(h(h_tgrid[kp]))
-        where v[i] are the eigenvectors of the covariance matrix of
-        log(h(h_tgrid[1])), ..., log(h(h_tgrid[k])). Eigenvectors whose eigenvalue is
-        negative (due to rounding errors) or less than the eigenvalue threshold are ignored,
-        in that case kp < k.
+        (1) 'canonical'. log(h(t)) is represented by the vector h_log_raw = h_log. The vector h_log_raw = h_log
+        has distribution N(0, Sigma) in this case.
 
-        (3) 'eigenbasis_scaled'. Same as (2) except that the entries of c[i] are scaled, i.e.
-            h_sigma * sum_i { c[i] * l[i] * v[i] } = log(h(h_tgrid[1])), ..., log(h(h_tgrid[kp]))
-        where l[i] is the eigenvalue that belongs to eigenvector v[i].
+        (2) 'eigenbasis'. log(h(t)) is represented by the vector h_log_raw = M^T h_log. The vector h_log_raw
+        has distribution N(0, h_sigma^2 L) in this case.
+
+        (3) 'eigenbasis_scaled'. log(h(t)) is represented by the vector h_log_raw = (1/h_sigma^2) L^(-1/2) M^T.
+        The vector h_log_raw has distribution N(0, I) in this case. Here, 'I' denotes the identity matrix, and
+        L^(-1/2) = diag(1/sqrt(l[1]),...,1/sqrt(l[n])) denotes the inverse of the square root of the (diagonal!)
+        matrix L.
 
         :param newbasis: The basis to switch to ('canonical' or 'eigenbasis' or 'eigenbasis_scaled')
         """
@@ -491,15 +498,17 @@ class VelocityModel(nn.Module):
         """
         if self.h_basis == "canonical":
             s = exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2)))
+            return (self.h_sigma ** 2) * s if include_sigma else s
         elif self.h_basis == "eigenbasis":
+            # The basis is orthonormal here, and h_sigma is not included in the eigenvalues
             s = diagflat(self.h_eigenvalues())
-        elif self.h_basis == "eigenbasis_scaled" and include_sigma:
+            return (self.h_sigma ** 2) * s if include_sigma else s
+        elif self.h_basis == "eigenbasis_scaled":
+            # The basis is orthogonal but not normalized here, h_sigma and eigenvalues are absorbed into the basis
             s = diagflat(ones_like(self.h_eigenvalues()))
-        elif self.h_basis == "eigenbasis_scaled" and not include_sigma:
-            s = diagflat(ones_like(self.h_eigenvalues()) / (self.h_sigma ** 2))
+            return s  / (self.h_sigma ** 2) if not include_sigma else s
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
-        return (self.h_sigma ** 2) * s if include_sigma else s
 
     def h_cov_inv(self, include_sigma=True) -> Tensor:
         """The inverse of the covariance matrix of (h_log_raw[1], ..., h_log_raw[k])
@@ -509,15 +518,18 @@ class VelocityModel(nn.Module):
         """
         if self.h_basis == "canonical":
             s = einsum("ij,j,kj->ik", self.h_eigenbasis(), dtensor([1.0]) / self.h_eigenvalues(), self.h_eigenbasis())
+            return s / (self.h_sigma ** 2) if include_sigma else s
         elif self.h_basis == "eigenbasis":
+            # The basis is orthonormal here, and h_sigma is not included in the eigenvalues
             s = diagflat(dtensor([1.0]) / self.h_eigenvalues())
-        elif self.h_basis == "eigenbasis_scaled" and include_sigma:
+            return s / (self.h_sigma ** 2) if include_sigma else s
+        elif self.h_basis == "eigenbasis_scaled":
+            # The basis is orthogonal but not normalized here, h_sigma and eigenvalues are absorbed into the basis
             s = diagflat(ones_like(self.h_eigenvalues()))
-        elif self.h_basis == "eigenbasis_scaled" and not include_sigma:
-            s = diagflat(ones_like(self.h_eigenvalues()) * (self.h_sigma ** 2))
+            return s * (self.h_sigma ** 2) if not include_sigma else s
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
-        return s / (self.h_sigma ** 2) if include_sigma else s
+
 
     def update_h_cov_eig(self):
         """Recompute the eigenvalues and eigenvectors of self.h_cov()"""
@@ -601,17 +613,17 @@ class VelocityModel(nn.Module):
     def sample_hlog(self, basis : str, sample_shape : torch.Size = torch.Size([1])):
         self.update_h_cov_eig()
         # Generate as many standard-normal random variables for each sample as the covariance matrix of h
-        # has eigenvectors that are significantly larger than zero.
+        # has eigenvectors that are significantly larger than zero. This is a representation of a random
+        # h in eigenbasis_scaled.
         shape = (self.h_cov_eig.eigenvalues.size()[0],) + sample_shape
         z = torch.distributions.normal.Normal(dtensor([0.0]), dtensor([1.0])).rsample(shape)
-        # Generate random h_log in the eigenbasis_scaled representation
-        z = z * self.h_sigma
-        if basis == "canonical":
-            return matmul(self.h_eigenbasis(), z * sqrt(self.h_eigenvalues())[:, (None,) * len(sample_shape)])
-        elif basis == "eigenbasis":
-            return z * sqrt(self.h_eigenvalues())[:, (None,) * len(sample_shape)]
-        elif basis == "eigenbasis_scaled":
+        if basis == "eigenbasis_scaled":
             return z
+        z_scaled = (self.h_sigma**2) * z * sqrt(self.h_eigenvalues())[:, (None,) * len(sample_shape)]
+        if basis == "eigenbasis":
+            return z_scaled
+        elif basis == "canonical":
+            return matmul(self.h_eigenbasis(), z_scaled)
         else:
             raise ValueError("Invalid basis " + basis)
 
