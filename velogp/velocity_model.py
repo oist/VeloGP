@@ -602,10 +602,7 @@ class VelocityModel(nn.Module):
 
         :param hdependent_only: Whether to return the full density, or only the g_delta-dependent terms
         """
-        if hyperparameter_dependence:
-            r = sum(log(self.g_delta_prefactor))
-        else:
-            r = 0
+        r = sum(log(self.g_delta_prefactor)) if hyperparameter_dependence else 0
         r += sum(abs(self.g_delta_scaled))
         return r
 
