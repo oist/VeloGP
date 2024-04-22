@@ -341,8 +341,9 @@ print("*** FITTING MODEL")
 ALG.optimize_parameters(log_phases=True)
 
 # Compute posterior covariances of parameters
-print("*** COMPUTING POSTERIOR DISTRIBUTION")
-COV, COV_PMAP = ALG.parameter_posterior_cov()
+print("*** COMPUTING POSTERIOR DISTRIBUTIONS")
+COV_V0, COV_V0_PMAP = ALG.parameter_posterior_cov(["v0_scaled"])
+COV_HG, COV_HG_PMAP = ALG.parameter_posterior_cov(["h_log_raw", "g_delta_scaled"])
 
 # Save results
 print("*** SAVING RESULTS")
@@ -361,8 +362,9 @@ if ARGS.out_objects is not None:
     f = None
     try:
         f = open_file(ARGS.out_objects, "wb+")
-        obj = {"model": MODEL, "cov": COV, "cov.pmap": COV_PMAP,
-               "loss": LOSS, "algorithm": ALG}
+        obj = {"model": MODEL, "loss": LOSS, "algorithm": ALG,
+               "cov_v0": COV_V0, "cov_v0.pmap": COV_V0_PMAP,
+               "cov_hg": COV_HG, "cov_hg.pmap": COV_HG_PMAP }
         pickle.dump(obj, f)
     except Exception as e:
         print(f"ERROR: Failed to save {ARGS.out_objects}: {e}")
@@ -410,7 +412,7 @@ if ARGS.out_vt is not None:
         tab = np.zeros(MODEL.h_tgrid.shape[0], dtype=cols)
         tab["t"] = MODEL.h_tgrid
         tab["vt"] = MODEL.v_t(MODEL.h_tgrid).detach()
-        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV, COV_PMAP).detach()
+        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV_HG, COV_HG_PMAP).detach()
         # Write tab-separated to output file
         f = open_file(ARGS.out_vt, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
@@ -473,7 +475,7 @@ if ARGS.plot_vt is not None:
 
             plot_t = MODEL.h_tgrid
             plot_vt = MODEL.v_t(MODEL.h_tgrid).detach()
-            plot_vt_stderr = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV, COV_PMAP).detach()
+            plot_vt_stderr = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV_HG, COV_HG_PMAP).detach()
             plot_yrange = [0.8 * pt.min(plot_vt[plot_t <= t_fin]).item(), pt.max(plot_vt[plot_t <= t_fin]).item() * 1.2]
 
         pp.clf()

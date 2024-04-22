@@ -239,11 +239,32 @@ class VelocityModel(nn.Module):
         return (dtensor([1.0]) + self.g_delta)
 
     def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[int, int]) -> Tensor:
+        # NOTE: the posterior covariance matrix posterior_cov should *not*
+        # include the parameter v0_scaled. In our model, the only part of
+        # the posterior likelihood that discriminates between two solutions
+        # v0, h(t) and v0', h' where v0 = a * v0' and h'(t) = a * h(t) is the
+        # prior on log h -- it will prefer the solution which reduces the overall
+        # square-deviation of log h(t) from zero. Therefore, if we include v0
+        # in the posterior covariance matrix, the credible interval for h(t)
+        # is not, in fact determined by the data -- it is solely determined
+        # by the prior on h(t). While this is in principle correct, it inflates
+        # the credible interval of v0 * h(t) unless the anti-correlation of these
+        # two parameters is correctly taken into account, which we currently do
+        # not do. We therefore instead warn if the posterior covariance matrix
+        # includes v0. In principle, this could be handled properly by taking the
+        # correlation between v0 and h(t) into account when computing the credible
+        # interval for v0 * h(t). However, the benefit is small, since once h(t) is
+        # fixed, v0 is defined by the data very precisely, and thus adds little to
+        # the uncertainty about v0 * h(t).
+        if "v0_scaled" in pmap:
+            print("WARNING: Parameter v0_scaled should be excluded from the covariance " +
+                  "matrix used with v_t_posterior_stderr(), otherwise the posterior std. " +
+                  "err. is inflated due to the anti-correlation of v0 and h(t).")
+
         assert "h_log_raw" in pmap
         i, l = pmap["h_log_raw"], numel(self.h_log_raw)
         pc = posterior_cov[i:(i + l), i:(i + l)]
-
-        # TODO: Take the uncertainty of v0 into account as well!
+        
         return self.v0 * self.h_posterior_stderr(t, pc)
 
     def h_indices(self, t: Tensor) -> Tensor:
