@@ -65,15 +65,17 @@ parser.add_argument("inputfile",
                     help="abundance table")
 parser.add_argument("--out-model", metavar="filename",
                     help="output file for the fitted model")
-parser.add_argument("--out-all", metavar="filename",
+parser.add_argument("--out-objects", metavar="filename",
                     help="output file for the loss function, fit algorithm and fitted model")
+parser.add_argument("--out-abundance", metavar="filename",
+                    help="output observed and predicted abundances")
 parser.add_argument("--out-vt", metavar="filename",
                     help="output file for the velocity as a function of time as a tab-separated table")
 parser.add_argument("--out-vx", metavar="filename",
                     help="output file for the delays incurred at each v(x) feature")
 parser.add_argument("--out-stats", metavar="filename",
                     help="output file for fitting statistics")
-parser.add_argument("--plot-fit", metavar="filename",
+parser.add_argument("--plot-abundance", metavar="filename",
                     help="output file for a plot of the input abundances and fitted model")
 parser.add_argument("--plot-vt", metavar="filename",
                     help="output file for a plot of the velocity as a function of time")
@@ -354,16 +356,45 @@ if ARGS.out_model is not None:
         print(f"ERROR: Failed to save {ARGS.out_model}: {e}")
 
 # Save all results
-if ARGS.out_all is not None:
-    print(f"Saving fitting algorithm, loss function, fitted model and posterior covariances to {ARGS.out_all}")
+if ARGS.out_objects is not None:
+    print(f"Saving fitting algorithm, loss function, fitted model and posterior covariances to {ARGS.out_objects}")
     f = None
     try:
-        f = open_file(ARGS.out_all, "wb+")
+        f = open_file(ARGS.out_objects, "wb+")
         obj = {"model": MODEL, "cov": COV, "cov.pmap": COV_PMAP,
                "loss": LOSS, "algorithm": ALG}
         pickle.dump(obj, f)
     except Exception as e:
-        print(f"ERROR: Failed to save {ARGS.out_all}: {e}")
+        print(f"ERROR: Failed to save {ARGS.out_objects}: {e}")
+    finally:
+        if f is not None:
+            f.close()
+
+# Save y_obs and y_pred
+if ARGS.out_abundance is not None:
+    print(f"Saving observed and predicted abundances to {ARGS.out_abundance}")
+    f = None
+    try:
+        # Get model predictions
+        p_pred, scale = LOSS.abundance_and_scale()
+        # Build table
+        slen = len(SINGLE_CHROMOSOME)
+        cols = [ ('chr', f'U{slen}'), ('pos', np.int32), ('y_obs', np.float64), ('y_obs_stderr', np.float64),
+                 ('y_pred', np.float64), ('p_pred', np.float64) ]
+        fmt = ('%s', '%d', '%.5f', '%.5f', '%.5f', '%.5f' )
+        tab = np.zeros(LOSS.x.shape[0], dtype=cols)
+        tab["chr"] = SINGLE_CHROMOSOME
+        tab["pos"] = LOSS.x
+        tab["y_obs"] = ABUNDANCE["y_obs"]
+        tab["y_obs_stderr"] = ABUNDANCE["s_obs"]
+        tab["y_pred"] = p_pred.detach() * scale.detach()
+        tab["p_pred"] = p_pred.detach()
+        # Write tab-separated to output file
+        f = open_file(ARGS.out_abundance, "wt+")
+        f.write("\t".join([name for (name, type) in cols]) + "\n")
+        np.savetxt(f, tab, delimiter="\t", fmt=fmt)
+    except Exception as e:
+        print(f"ERROR: Failed to save {ARGS.out_abundance}: {e}")
     finally:
         if f is not None:
             f.close()
@@ -400,8 +431,8 @@ if ARGS.out_vx is not None:
         # Build table
         slen = max([ len(f.chr) for f in VX_FEATURES ])
         cols = [ ('chr', f'U{slen}'), ('begin', np.int32), ('end', np.int32), ('length', np.int32), ('delayscale', np.float64),
-                 ('g', np.float64), ('v_bps', np.float64), ('delay_rel', np.float64), ('delay_s', np.float64) ]
-        fmt = ('%s', '%d', '%d', '%d', '%.2f', '%.5f', '%.5f', '%.5f', '%.5f')
+                 ('g', np.float64), ('v_bps', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64), ('delay_s', np.float64) ]
+        fmt = ('%s', '%d', '%d', '%d', '%.2f', '%.5f', '%.5f', '%.5f', '%.5f', '%.5f')
         tab = np.zeros(MODEL.g_delta.shape[0], dtype=cols)
         features = list([f for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME])
         tab["chr"] = [f.chr for f in features ]
@@ -411,14 +442,15 @@ if ARGS.out_vx is not None:
         tab["delayscale"] = [f.delayscale for f in features ]
         tab["g"] = MODEL.g.detach().numpy()
         tab["v_bps"] = MODEL.v0.detach().numpy() / MODEL.g.detach().numpy()
-        tab["delay_rel"] = MODEL.g_delta.detach().numpy() * MODEL.g_xranges_len.detach().numpy()
-        tab["delay_s"] = MODEL.g_delta.detach().numpy() * MODEL.g_xranges_len.detach().numpy() / MODEL.v0.detach().numpy()
+        tab["delay_bp"] = MODEL.g_delta.detach().numpy() * MODEL.g_xranges_len.detach().numpy()
+        tab["delay_rel"] = tab["delay_bp"] / MODEL.genome_length
+        tab["delay_s"] = tab["delay_bp"] / MODEL.v0.detach().numpy()
         # Write tab-separated to output file
         f = open_file(ARGS.out_vx, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
         np.savetxt(f, tab, delimiter="\t", fmt=fmt)
     except Exception as e:
-        print(f"ERROR: Failed to save {ARGS.out_all}: {e}")
+        print(f"ERROR: Failed to save {ARGS.out_vx}: {e}")
     finally:
         if f is not None:
             f.close()
@@ -459,16 +491,16 @@ if ARGS.plot_vt is not None:
         pass
 
 # Plot abundance data and fitted model
-if ARGS.plot_fit is not None:
+if ARGS.plot_abundance is not None:
     try:
-        print(f"Plotting data and fitted model to {ARGS.plot_fit}")
+        print(f"Plotting data and fitted model to {ARGS.plot_abundance}")
         pp.clf()
         pp.figure(figsize=(2.5, 2.0))
         pp.plot(LOSS.x.detach().numpy(), LOSS.y_obs.detach().numpy(), marker="x", markersize=0.25, linestyle="", color="grey")
         pp.plot(LOSS.x.detach().numpy(), LOSS.y_pred().detach().numpy(), linewidth=0.5, color="navy")
         pp.tight_layout()
-        pp.savefig(ARGS.plot_fit, dpi=300, bbox_inches='tight')
+        pp.savefig(ARGS.plot_abundance, dpi=300, bbox_inches='tight')
     except Exception as e:
-        print(f"ERROR: Failed to save {ARGS.plot_fit}: {e}")
+        print(f"ERROR: Failed to save {ARGS.plot_abundance}: {e}")
     finally:
         pass
