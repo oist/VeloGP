@@ -106,6 +106,8 @@ parser.add_argument("--genome", required=True, metavar="fasta-file",
                     help="FASTA file containing the reference genome (may be compressed)")
 parser.add_argument("--columns", default="seq,midpoint,coverage_ratio,coverage_ratio_stderr,ratio_mappable",
                     help="comma-separated names of columns containing chromosome, position, abundance, std.error of abundance and validity")
+parser.add_argument('--verbose', default=False, action=argparse.BooleanOptionalAction,
+                    help="output intermediate steps during parameter optimization")
 parser.add_argument("--cores", type=int,
                     help="number of cores to use (default: autodetect)")
 
@@ -338,7 +340,7 @@ print(f"  data points: {len(ABUNDANCE)} ({100.0*len(ABUNDANCE)/ABUNDANCE_ROWS_PR
 
 # Estimate parameters
 print("*** FITTING MODEL")
-ALG.optimize_parameters(log_phases=True)
+ALG.optimize_parameters(log_phases=True, log_steps=ARGS.verbose)
 
 # Compute posterior covariances of parameters
 print("*** COMPUTING POSTERIOR DISTRIBUTIONS")
