@@ -140,7 +140,7 @@ class VelocityModel(nn.Module):
             assert all(isfinite(self.h_sigma))
             self.h_sigma.clamp_(0.0, math.inf)
             if self.h_basis == "canonical":
-                h_log_raw_scale = 1
+                h_log_raw_scale = self.h_sigma
             elif self.h_basis == "eigenbasis":
                 with no_grad():
                     h_log_raw_scale = self.h_sigma * sqrt(self.h_eigenvalues())
