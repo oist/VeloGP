@@ -71,7 +71,7 @@ parser.add_argument("--out-abundance", metavar="filename",
                     help="output observed and predicted abundances")
 parser.add_argument("--out-vt", metavar="filename",
                     help="output file for the velocity as a function of time as a tab-separated table")
-parser.add_argument("--out-vx", metavar="filename",
+parser.add_argument("--out-vx-feature-delays", metavar="filename",
                     help="output file for the delays incurred at each v(x) feature")
 parser.add_argument("--out-stats", metavar="filename",
                     help="output file for fitting statistics")
@@ -422,23 +422,26 @@ if ARGS.out_vt is not None:
             f.close()
 
 # Save v(x), i.e. delays incurred at various genomic features
-if ARGS.out_vx is not None:
-    print(f"Saving v(x) to {ARGS.out_vx}")
+if ARGS.out_vx_feature_delays is not None:
+    print(f"Saving v(x) to {ARGS.out_vx_feature_delays}")
     f = None
     try:
         # Check that we agree on the order of the genomic features...
         assert all(MODEL.g_xranges_l == pt.tensor(list([f.begin for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME]), dtype=pt.int32))
         # Build table
-        slen = max([ len(f.chr) for f in VX_FEATURES ])
-        cols = [ ('chr', f'U{slen}'), ('begin', np.int32), ('end', np.int32), ('length', np.int32), ('delayscale', np.float64),
+        chr_slen = max([ len(f.chr) for f in VX_FEATURES ])
+        fn_slen = max([ len(f.name) for f in VX_FEATURES ])
+        cols = [ ('chr', f'U{chr_slen}'), ('begin', np.int32), ('end', np.int32), ('length', np.int32),
+                 ('name', f'U{fn_slen}'), ('delayscale', np.float64),
                  ('g', np.float64), ('v_bps', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64), ('delay_s', np.float64) ]
-        fmt = ('%s', '%d', '%d', '%d', '%.2f', '%.5f', '%.5f', '%.5f', '%.5f', '%.5f')
+        fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f', '%.5f', '%.5f')
         tab = np.zeros(MODEL.g_delta.shape[0], dtype=cols)
         features = list([f for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME])
         tab["chr"] = [f.chr for f in features ]
         tab["begin"] = [f.begin for f in features ]
         tab["end"] = [f.end for f in features ]
         tab["length"] = [f.end - f.begin for f in features ]
+        tab["name"] = [f.name for f in features ]
         tab["delayscale"] = [f.delayscale for f in features ]
         tab["g"] = MODEL.g.detach().numpy()
         tab["v_bps"] = MODEL.v0.detach().numpy() / MODEL.g.detach().numpy()
@@ -446,11 +449,11 @@ if ARGS.out_vx is not None:
         tab["delay_rel"] = tab["delay_bp"] / MODEL.genome_length
         tab["delay_s"] = tab["delay_bp"] / MODEL.v0.detach().numpy()
         # Write tab-separated to output file
-        f = open_file(ARGS.out_vx, "wt+")
+        f = open_file(ARGS.out_vx_feature_delays, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
         np.savetxt(f, tab, delimiter="\t", fmt=fmt)
     except Exception as e:
-        print(f"ERROR: Failed to save {ARGS.out_vx}: {e}")
+        print(f"ERROR: Failed to save {ARGS.out_vx_feature_delays}: {e}")
     finally:
         if f is not None:
             f.close()
