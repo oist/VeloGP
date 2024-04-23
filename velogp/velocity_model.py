@@ -459,6 +459,24 @@ class VelocityModel(nn.Module):
         # G(x[j]) = sum_i g[i] * c[i,j]
         return sum(c * g[(...,) + (None,) * x.dim()], dim=0)
 
+    def G_0_inv(self, z: Tensor):
+        """
+        Evaluates G_0^-1(z) for the specified points z
+
+        :param u: Points at which to evaluate G_0^-1
+        :return: G_0^-1(u) at the specified points u
+        """
+
+        assert all(z >= 0)
+        # Create vector of values of g(x) at the grid points g_xgrid
+        g = cat((dtensor([1.0]), flatten(stack((self.g, ones_like(self.g_delta_scaled)), dim=1))))
+        # Create vector of values of G_0(x) at the grid points g_xgrid
+        G = cat((dtensor([0.0]), torch.cumsum(self.g_xgrid_len[:-1] * g, dim=0),
+                 dtensor([float('inf')])))
+
+
+        pass
+
     def G(self, x: Tensor, o: Tensor, d: Tensor) -> Tensor:
         """
         Evaluates G(x,o) = | int_p g(u) du | for the triples (x, o, d) where p is a path from o to x in direction d.
