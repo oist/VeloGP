@@ -10,7 +10,8 @@ from torch import nn, linalg
 from torch import *
 from builtins import float, int
 
-def dtensor(v, **kw_args) -> DoubleTensor:
+def dtensor(v, **kw_args) -> Tensor:
+    """ Creates a 64-bit floating point tensor """
     return torch.tensor(v, dtype=torch.double, **kw_args)
 
 class VelocityModel(nn.Module):
@@ -21,6 +22,8 @@ class VelocityModel(nn.Module):
 
     @dataclass
     class Eigenbasis:
+        """ Represents a basis the diagonalizes the covariance matrix of h(t) """
+
         eigenvalues: Tensor
         eigenvectors: Tensor
         n: int
@@ -43,6 +46,7 @@ class VelocityModel(nn.Module):
 
     @dataclass
     class X:
+        """ Represents a set of genomic positions, pre-processes for faster model evaluation """
         x: Tensor
         origin_index_left: Tensor
         origin_index_right: Tensor
@@ -124,6 +128,8 @@ class VelocityModel(nn.Module):
             self.g_delta_scaled.requires_grad = False
 
     def clamp_parameters(self):
+        """ Clamp parameters to their respective domains """
+
         # We must update parameters in-place since optimizes identify parameters
         # by the *identity* of the corresponding nn.Parameter object. In-place
         # updates are forbidding while auto-grad is active, but that's OK, this
@@ -151,6 +157,8 @@ class VelocityModel(nn.Module):
             self.h_log_raw.clamp_(-10 * h_log_raw_scale, 10 * h_log_raw_scale)
 
     def resolve_params(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]]) -> List[Tuple[str, nn.Parameter]]:
+        """ Converts a list of either `nn.Parameter` instances *or* parameter names into a list of (name, `nn.Parameter`) tuples """
+
         # Return unmodified parameter list if it is already resolved
         if (len(params) == 0) or isinstance(params[0], tuple):
             return params
@@ -160,7 +168,7 @@ class VelocityModel(nn.Module):
         for name, param in self.named_parameters():
             nmap[id(param)] = name
             pmap[name] = param
-        # Return list of (str, nn.Parameter) tuples
+        # Return list of (`str`, `nn.Parameter`) tuples
         r = []
         for p in params:
             if isinstance(p, nn.Parameter):
@@ -169,43 +177,79 @@ class VelocityModel(nn.Module):
                 r.append((p, pmap[p]))
         return r
 
-    def flatmap(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]]):
+    def flatmap(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]]) -> Tuple[List[int], Dict[str, int]]:
+        """
+        Creates a mapping of the given parameters into a flattened vector
+        :param params: List of `nn.Parameter` instances, parameter names, or (name, nn.Parameter) tuples
+        :return: Tuple (c, pmap) where c[i] is the starting index of the i-th parameter, and pmap[n] the starting
+        index of the parameter named n.
+        """
+
         params = self.resolve_params(params)
         # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i
         c = [0] + np.cumsum([ numel(p) for i, (n, p) in enumerate(params) ]).tolist()
         pmap = { ni: ci for (ci, (ni, pi)) in zip(c[:-1], params) }
         return c, pmap
 
-    def pvector(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]], fm = None):
+    def pvector(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]], fm = None) -> Tensor:
+        """
+        Returns a flat vector containing the current values of the specified parameters
+        :param params: List of nn.Parameter instances, parameter names, or (name, nn.Parameter) tuples
+        :param fm: A mapping (c, pmap) as created by `self.flatmap`, if `None` a new mapping is created
+        :return: A 1-D tensor containing the concatenated values of the given parameters
+        """
+
+        # Obtain parameter map
         params = self.resolve_params(params)
         if fm is None:
             c, pmap = self.flatmap(params)
         else:
             c, pmap = fm
-        g = zeros(Size([c[-1]]), dtype=torch.float64)
+
+        # Create output vector and assign values
+        r = zeros(Size([c[-1]]), dtype=torch.float64)
         for (ci, (ni, pi)) in zip(c[:-1], params):
             ni = numel(pi)
-            g[ci:(ci + ni)] = pi
-        return g
+            r[ci:(ci + ni)] = pi
+        return r
 
     def pvector_assign(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]], values : Tensor, fm = None):
+        """
+        Assigns values to the specified parameters taken from the flat parameter vector `values`
+        :param params: List of nn.Parameter instances, parameter names, or (name, nn.Parameter) tuples
+        :param fm: A mapping (c, pmap) as created by `self.flatmap`, if `None` a new mapping is created
+        """
+
+        # Obtain parameter map
         params = self.resolve_params(params)
         if fm is None:
             c, pmap = self.flatmap(params)
         else:
             c, pmap = fm
+
+        # Assign values from input vector
         assert(values.dim() == 1 and values.size(0) == c[-1])
         for (ci, (ni, pi)) in zip(c[:-1], params):
             ni = numel(pi)
             pi[:] = values[ci:(ci + ni)]
 
 
-    def pgradient(self, params: List[nn.Parameter], fm = None):
+    def pgradient(self, params: List[nn.Parameter], fm = None) -> Tensor:
+        """
+        Returns a flat vector containing the gradients of the specified parameters
+        :param params: List of nn.Parameter instances, parameter names, or (name, nn.Parameter) tuples
+        :param fm: A mapping (c, pmap) as created by `self.flatmap`, if `None` a new mapping is created
+        :return: A 1-D tensor containing the concatenated values of the given parameters
+        """
+
+        # Obtain parameter map
         params = self.resolve_params(params)
         if fm is None:
             c, pmap = self.flatmap(params)
         else:
             c, pmap = fm
+
+        # Create output vector and assign gradients
         g = zeros(Size([c[-1]]), dtype=torch.float64)
         for (ci, (ni, pi)) in zip(c[:-1], params):
             ni = numel(pi)
@@ -222,52 +266,75 @@ class VelocityModel(nn.Module):
         return self.v0 * self.h(t)
 
     @property
-    def v0(self):
+    def v0(self) -> Tensor:
+        """ The current value of v0 """
         return self.v0_scaled * self.v0_prefactor
 
     @v0.setter
-    def v0(self, value: Tensor):
+    def v0(self, value: Tensor) -> Tensor:
+        """ Sets the current value of v0 """
         assert((value.dim() == 1) and (value.size()[0] == 1))
         self.v0_scaled[0] = value / self.v0_prefactor
 
     @property
-    def g_delta(self):
+    def g_delta(self) -> Tensor:
+        """ The current value of g_delta """
         return self.g_delta_scaled * self.g_delta_prefactor
 
     @property
-    def g(self):
+    def g(self) -> Tensor:
+        """ The current value of g """
         return (dtensor([1.0]) + self.g_delta)
 
-    def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[int, int]) -> Tensor:
-        # NOTE: the posterior covariance matrix posterior_cov should *not*
-        # include the parameter v0_scaled. In our model, the only part of
-        # the posterior likelihood that discriminates between two solutions
-        # v0, h(t) and v0', h' where v0 = a * v0' and h'(t) = a * h(t) is the
-        # prior on log h -- it will prefer the solution which reduces the overall
-        # square-deviation of log h(t) from zero. Therefore, if we include v0
-        # in the posterior covariance matrix, the credible interval for h(t)
-        # is not, in fact determined by the data -- it is solely determined
-        # by the prior on h(t). While this is in principle correct, it inflates
-        # the credible interval of v0 * h(t) unless the anti-correlation of these
-        # two parameters is correctly taken into account, which we currently do
-        # not do. We therefore instead warn if the posterior covariance matrix
-        # includes v0. In principle, this could be handled properly by taking the
-        # correlation between v0 and h(t) into account when computing the credible
-        # interval for v0 * h(t). However, the benefit is small, since once h(t) is
-        # fixed, v0 is defined by the data very precisely, and thus adds little to
-        # the uncertainty about v0 * h(t).
+    def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[str, int]) -> Tensor:
+        """
+        The standard deviation of the posterior distribution of v(t)
+
+        NOTE: the posterior covariance matrix posterior_cov should *not*
+        include the parameter v0_scaled. In our model, the only part of
+        the posterior likelihood that discriminates between two solutions
+        v0, h(t) and v0', h' where v0 = a * v0' and h'(t) = a * h(t) is the
+        prior on log h -- it will prefer the solution which reduces the overall
+        square-deviation of log h(t) from zero. Therefore, if we include v0
+        in the posterior covariance matrix, the credible interval for h(t)
+        is not, in fact determined by the data -- it is solely determined
+        by the prior on h(t). While this is in principle correct, it inflates
+        the credible interval of v0 * h(t) unless the anti-correlation of these
+        two parameters is correctly taken into account, which we currently do
+        not do. We therefore instead warn if the posterior covariance matrix
+        includes v0. In principle, this could be handled properly by taking the
+        correlation between v0 and h(t) into account when computing the credible
+        interval for v0 * h(t). However, the benefit is small, since once h(t) is
+        fixed, v0 is defined by the data very precisely, and thus adds little to
+        the uncertainty about v0 * h(t).
+
+        :param t: The times t at which to evaluate the standard deviation of v(t)
+        :param posterior_cov: The posterior covariance matrix of the raw model parameters
+        :param pmap: Parameter map for `posterior_cov` that maps parameter names to their
+        starting indices in `posterior_cov`
+        :return: A tensor containing the posterior standard deviation of v(t) at times `t`
+        """
+
         if "v0_scaled" in pmap:
             print("WARNING: Parameter v0_scaled should be excluded from the covariance " +
                   "matrix used with v_t_posterior_stderr(), otherwise the posterior std. " +
                   "err. is inflated due to the anti-correlation of v0 and h(t).")
 
+        # Extract covariances of h_log_raw
         assert "h_log_raw" in pmap
         i, l = pmap["h_log_raw"], numel(self.h_log_raw)
         pc = posterior_cov[i:(i + l), i:(i + l)]
-        
+
+        # Return scaled posterior standard deviation of h(t)
         return self.v0 * self.h_posterior_stderr(t, pc)
 
     def h_indices(self, t: Tensor) -> Tensor:
+        """
+        Map times `t` to their corresponding indices in `h_tgrid`
+        :param t: times to map to indices
+        :return: the indices in `h_tgrid` that correspond to the given times
+        """
+
         assert all(t >= self.h_tgrid[0])
         # Compute H(t) on the (fixed) grid h_tgrid (we could call H here, but this is faster)
         # NOTE: We required h_tgrid to contain +inf in its last element, since that guarantees that
@@ -289,6 +356,15 @@ class VelocityModel(nn.Module):
         return exp(self.h_log("canonical")[self.h_indices(t)])
 
     def h_posterior_stderr(self, times: Tensor, h_log_raw_posterior_cov: Tensor) -> Tensor:
+        """
+        Computes the posterior standard deviation of h(t) from the posterior covariance matrix of the model parameters
+
+        NOTE: The covariance matrix should not include the parameter v0, see discussion in `self.vt_posterior_stderr()`
+
+        :param times: Times for which to compute the posterior standard deviation of h(t)
+        :param h_log_raw_posterior_cov: Posterior covariance matrix of model parameters (excluding
+        :return: posterior standard deviation of h(t)
+        """
         assert ((h_log_raw_posterior_cov.dim() == 2) and
                 (h_log_raw_posterior_cov.size() == Size([self.h_log_raw.size()[0], self.h_log_raw.size()[0]])))
         # We transform the posterior covariance matrix of the parameters into a covariance matrix
@@ -425,6 +501,13 @@ class VelocityModel(nn.Module):
         return l_idx, r_idx
 
     def prepare_input(self, x: Tensor):
+        """ Performs parameter-independent computations on the model input (i.e. tensor containing genomic locations),
+        and returns a `VelocityModel.X` instance that represents the processed input. Passing this to `self.forward()`
+        speeds up the computation.
+
+        :param x: tensor containing genomic locations
+        :return: `VelocityModel.X` instance containing pre-processed input
+        """
         assert all((x >= tensor([0], dtype=torch.int32)) & (x <= tensor([self.genome_length], dtype=torch.int32)))
         with no_grad():
             (i_left, i_right) = self.surrounding_origins(x)
@@ -551,7 +634,6 @@ class VelocityModel(nn.Module):
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
 
-
     def update_h_cov_eig(self):
         """Recompute the eigenvalues and eigenvectors of self.h_cov()"""
         if (self.h_cov_eig is None) or (self.h_cov_eig_timescale != self.h_timescale):
@@ -627,8 +709,14 @@ class VelocityModel(nn.Module):
         r += sum(abs(self.g_delta_scaled))
         return r
 
-
     def sample_hlog(self, basis : str, sample_shape : torch.Size = torch.Size([1])):
+        """ Generates a random vector log(h(t_grid[0])), ..., log(h(t_grid[n]))
+
+        :param basis:basis to return the vector in
+        :param sample_shape: one vector is created for every element that a tensor with the given shape has
+        :return: A vector with shape (k, sample_shape) where k is the number of basis vectors in the selected basis
+        """
+
         self.update_h_cov_eig()
         # Generate as many standard-normal random variables for each sample as the covariance matrix of h
         # has eigenvectors that are significantly larger than zero. This is a representation of a random
