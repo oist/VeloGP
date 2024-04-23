@@ -438,7 +438,7 @@ class VelocityModel(nn.Module):
 
     def G_0(self, x: Tensor) -> Tensor:
         """
-        Evaluates G_0(x) = int_0^x du
+        Evaluates G_0(x) = int_0^x g(u) du
 
         g(x) is piece-wise constant and = 1 except on the intervals [g_xranges_l[i], g_xranges_u[i]] where g(x) = g[i].
 
