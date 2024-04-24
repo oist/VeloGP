@@ -186,8 +186,7 @@ class FitVelocityModel:
             origin_loga0[i] = log_a0
         with no_grad():
             self.model.delay[:] = (max(origin_loga0) - origin_loga0) / self.model.growthrate
-            self.model.v0_prefactor[0] = mean(origin_v)
-            self.model.v0_scaled[0] = 1.0
+            self.model.v0 = mean(origin_v)
         # II. Optimize g()
         # We first optimize v0 and the spatial delays since these are easier to fit.
         # We start with a small learning rate because L-BGFS is otherwise prone to making
@@ -199,13 +198,13 @@ class FitVelocityModel:
         # starting point for the next step.
         if log_phases:
             print("Optimizing v0 and g()")
-        self.model.v0_scaled = nn.Parameter(self.model.v0_scaled)
+        self.model.v0_log = nn.Parameter(self.model.v0_log)
         self.model.g_delta_scaled = nn.Parameter(self.model.g_delta_scaled)
-        self.run_lbfgs([self.model.v0_scaled, self.model.g_delta_scaled],
+        self.run_lbfgs([self.model.v0_log, self.model.g_delta_scaled],
                        lr_start=0.1, lr_end=1.0, iterations=100,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
-        self.optimized_parameters.append("v0_scaled")
+        self.optimized_parameters.append("v0_log")
         self.optimized_parameters.append("g_delta_scaled")
         # III. Optimize h()
         # Next we make a first optimization pass for h() were we keep v0 and g()
@@ -224,7 +223,7 @@ class FitVelocityModel:
             print("Optimizing h()")
         self.model.h_switch_basis("eigenbasis_scaled")
         self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
-        self.run_lbfgs([ self.model.v0_scaled, self.model.h_log_raw ],
+        self.run_lbfgs([ self.model.v0_log, self.model.h_log_raw ],
                        lr_start=0.1, lr_end=1.0, iterations=100,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
@@ -236,13 +235,13 @@ class FitVelocityModel:
         # Note that for lack of a good test, we currently don't check for convergence...
         if log_phases:
             print("Optimizing v0, g() and h() simultaneously")
-        self.run_lbfgs([ self.model.v0_scaled, self.model.g_delta_scaled, self.model.h_log_raw ],
+        self.run_lbfgs([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
                        lr_start=0.1, lr_end=1.0, iterations=1000,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         if log_phases:
             print("Finalizing v0, g() and h() until the object cannot be further improved")
-        self.run_lbfgs([ self.model.v0_scaled, self.model.g_delta_scaled, self.model.h_log_raw ],
+        self.run_lbfgs([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
                        lr_start=1.0, lr_end=1.0, iterations=10000,
                        tolerance_change=1e-8, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)

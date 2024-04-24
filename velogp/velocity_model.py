@@ -61,9 +61,7 @@ class VelocityModel(nn.Module):
             # Growth rate
             self.growthrate = dtensor([1/3600], requires_grad=False)
             # Baseline velocity
-            self.v0_scaled = dtensor([1.0])
-            self.v0_prefactor = dtensor([500.0])
-            self.v0_prefactor.requires_grad = False
+            self.v0_log = log(dtensor([500]))
             # Gaussian process hyperparameters
             self.h_timescale = tensor([1e2], requires_grad=False)
             self.h_sigma = tensor([1.0], requires_grad=False)
@@ -135,8 +133,7 @@ class VelocityModel(nn.Module):
         # updates are forbidding while auto-grad is active, but that's OK, this
         # function should be called *before* the model is evaluated.
         with no_grad():
-            assert all(isfinite(self.v0_scaled))
-            self.v0_scaled.clamp_(0.0, math.inf)
+            assert all(isfinite(self.v0_log))
             assert all(isfinite(self.delay))
             self.delay.clamp_(0.0, math.inf)
             assert all(isfinite(self.g_delta_scaled))
@@ -267,13 +264,13 @@ class VelocityModel(nn.Module):
     @property
     def v0(self) -> Tensor:
         """ The current value of v0 """
-        return self.v0_scaled * self.v0_prefactor
+        return exp(self.v0_log)
 
     @v0.setter
     def v0(self, value: Tensor) -> Tensor:
         """ Sets the current value of v0 """
-        assert((value.dim() == 1) and (value.size()[0] == 1))
-        self.v0_scaled[0] = value / self.v0_prefactor
+        assert((value.dim() == 0))
+        self.v0_log[0] = log(value)
 
     @property
     def g_delta(self) -> Tensor:
@@ -393,7 +390,7 @@ class VelocityModel(nn.Module):
         :return: A tensor containing the posterior standard deviation of v(t) at times `t`
         """
 
-        if "v0_scaled" in pmap:
+        if "v0_log" in pmap:
             print("WARNING: Parameter v0_scaled should be excluded from the covariance " +
                   "matrix used with v_t_posterior_stderr(), otherwise the posterior std. " +
                   "err. is inflated due to the anti-correlation of v0 and h(t).")
@@ -852,7 +849,7 @@ class VelocityModel(nn.Module):
             raise ValueError("Invalid basis " + basis)
 
     def prior(self, parameter, hyperparameter_dependence):
-        if parameter is self.v0_scaled:
+        if parameter is self.v0_log:
             return 0
         elif parameter is self.h_log_raw:
             return self.prior_hlog(hyperparameter_dependence=hyperparameter_dependence)

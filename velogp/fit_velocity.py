@@ -344,7 +344,7 @@ ALG.optimize_parameters(log_phases=True, log_steps=ARGS.verbose)
 
 # Compute posterior covariances of parameters
 print("*** COMPUTING POSTERIOR DISTRIBUTIONS")
-COV_V0, COV_V0_PMAP = ALG.parameter_posterior_cov(["v0_scaled"])
+COV_V0, COV_V0_PMAP = ALG.parameter_posterior_cov(["v0_log"])
 COV_HG, COV_HG_PMAP = ALG.parameter_posterior_cov(["h_log_raw", "g_delta_scaled"])
 
 # Save results
