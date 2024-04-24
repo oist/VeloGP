@@ -233,7 +233,6 @@ class VelocityModel(nn.Module):
             ni = numel(pi)
             pi[:] = values[ci:(ci + ni)]
 
-
     def pgradient(self, params: List[nn.Parameter], fm = None) -> Tensor:
         """
         Returns a flat vector containing the gradients of the specified parameters
