@@ -487,7 +487,7 @@ class VelocityModel(nn.Module):
             # Tensor containing the length of the intersection of [0, t[j]] and [h_tgrid[i], h_tgrid[i+1]]
             c = maximum(zeros, minimum(dist, length))
         # H(t[j]) = sum_i h[i] * c[i,j]
-        return sum(c * exp(self.h_log()[(...,) + (None,) * t.dim()]), dim=0)
+        return sum(c * exp(self.h_log("canonical")[(...,) + (None,) * t.dim()]), dim=0)
 
     def Hinv(self, u: Tensor) -> Tensor:
         """Evaluates H^-1(u) at the specified points u
