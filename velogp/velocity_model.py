@@ -281,10 +281,89 @@ class VelocityModel(nn.Module):
         """ The current value of g_delta """
         return self.g_delta_scaled * self.g_delta_prefactor
 
+    @g_delta.setter
+    def g_delta(self, value: Tensor):
+        assert ((value.dim() == 1) and (value.size(0) == self.g_delta_prefactor.size(0)))
+        assert all(value >= dtensor([0.0]))
+        self.g_delta_scaled = value / self.g_delta_prefactor
+
     @property
     def g(self) -> Tensor:
         """ The current value of g """
         return (dtensor([1.0]) + self.g_delta)
+
+    @g.setter
+    def g(self, value: Tensor):
+        assert((value.dim() == 1) and (value.size(0) == self.g_delta_prefactor.size(0)))
+        assert all(value >= dtensor([1.0]))
+        self.g_delta_scaled = (value - dtensor([1.0])) / self.g_delta_prefactor
+
+    @property
+    def genome_length_virtual(self):
+        """ Returns the length of the genome in virtual coordinates """
+        return self.genome_length.double() + sum(self.g_delta * self.g_xranges_len)
+
+    def trajectories(self, t: Tensor = None):
+        # Use grid on which h() is defined if no output times are specified
+        if t is None:
+            t = self.h_tgrid
+        # Create output tensors, one for replisome positions, or for velocities
+        k = 2*numel(self.origins)
+        tab_x = zeros(t.shape + (k,))
+        tab_v = zeros(t.shape + (k,))
+        for o_i in builtins.range(0, numel(self.origins)):
+            for d_i, d in enumerate([-1, 1]):
+                # Compute replisome position in virtual coordinates
+                # TODO: We ignore diffusion here atm
+                z = self.origins[o_i] + d * self.v0 * maximum(self.H(t) - self.H(self.delay[o_i]), dtensor([0.0]))
+                if self.is_circular:
+                    z = remainder(z, self.genome_length_virtual)
+                # Translate to physical coordinates
+                x = self.G_0_inv(z)
+                tab_x[:, 2*o_i + d_i] = x
+                # Output instantaneous velocities
+                tab_v[:, 2*o_i + d_i] = self.v_t(t) / self.g_fun(x)
+        # Determine chromosome meeting points
+        # Iterate over pairs of replisomes moving towards one another
+        # For the first and last origin, there's a pair that wraps around on circular
+        # chromosomes. On linear chromosomes, these chromosomes hit the ends instead of
+        # meeting another chromosome
+        for o_i in builtins.range(0, numel(self.origins) + 1):
+            oi_left = o_i - 1
+            ri_left = 2*oi_left + 1
+            oi_right = o_i
+            ri_right = 2*oi_right
+            # Consider wrap-around for circular chromosomes
+            if self.is_circular:
+                if oi_right >= numel(self.origins):
+                    # On a circular chromosomes this is the same as o_left=-1, o_right=0
+                    break
+                ri_left = ri_left % k
+                oi_left = oi_left % numel(self.origins)
+            # Get left and right origins and compute time at which the replisomes meet
+            o_left = self.origins[oi_left] if oi_left >= 0 else dtensor([0.0])
+            d_left = self.delay[oi_left] if oi_left >= 0 else dtensor([0.0])
+            o_right = self.origins[oi_right] if oi_right < numel(self.origins) else self.genome_length
+            d_right = self.delay[oi_right] if oi_right< numel(self.origins) else dtensor([0.0])
+            # Blank out replisome positions before replisome creation
+            if ri_left >= 0:
+                tab_x[t < d_left, ri_left] = nan
+                tab_v[t < d_left, ri_left] = nan
+            if ri_right >= 0:
+                tab_x[t < d_right, ri_right] = nan
+                tab_v[t < d_right, ri_right] = nan
+            # Compute meeting time.
+            # TODO: This has to be adapted if G(x,o,d) ever becomes direction-dependent.
+            t_meet = self.Hinv((self.G(o_right, o_left, d=dtensor([1.0]))/self.v0 + self.H(d_left) + self.H(d_right))/2.0)
+            # Blank out origin positions after the meeting time
+            if ri_left >= 0:
+                tab_x[t > t_meet, ri_left] = nan
+                tab_v[t > t_meet, ri_left] = nan
+            if ri_right >= 0:
+                tab_x[t > t_meet, ri_right] = nan
+                tab_v[t > t_meet, ri_right] = nan
+        # Remove first row which ri_right to the entry t=0 we added at the top
+        return tab_x, tab_v
 
     def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[str, int]) -> Tensor:
         """
@@ -471,11 +550,21 @@ class VelocityModel(nn.Module):
         # Create vector of values of g(x) at the grid points g_xgrid
         g = cat((dtensor([1.0]), flatten(stack((self.g, ones_like(self.g_delta_scaled)), dim=1))))
         # Create vector of values of G_0(x) at the grid points g_xgrid
-        G = cat((dtensor([0.0]), torch.cumsum(self.g_xgrid_len[:-1] * g, dim=0),
-                 dtensor([float('inf')])))
-
-
-        pass
+        # Note: We add an extra point at the end to account for numerical
+        # inaccuracies in z. Other than x, which is an integer tensor, z
+        # is a floating-point tensor!
+        Gp = torch.cumsum(self.g_xgrid_len * g, dim=0)
+        G = cat((dtensor([0.0]), Gp, Gp[-1, None]+1), dim=0)
+        assert all(z < G[-1])
+        # Find x_i where G(x_i) <= z but G(x_(i+1)) > z
+        with no_grad():
+            lt = z[None, ...] < G[(...,) + (None,) * z.dim()]
+            idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
+        # Within [z_i, z_(i+1)] the function G is linear, i.e.
+        #   G(t) = G(z_i) + (z - z_i) * g[i]
+        # and its inverse is thus
+        #   G^-1(z) = z_i + (z - G(z_i)) / g[i]
+        return self.g_xgrid[idx] + (z - G[idx]) / g[idx]
 
     def G(self, x: Tensor, o: Tensor, d: Tensor) -> Tensor:
         """
@@ -488,9 +577,21 @@ class VelocityModel(nn.Module):
         :return: G(x,o) as a tensor of the same shape as x
         """
         result = (self.G_0(x) - self.G_0(o)) * sign(d)
-        wrap = logical_or(logical_and(x < o, d > tensor([0])), logical_and(o < x, d < tensor([0])))
-        result = where(wrap, result + self.G_0(self.genome_length), result)
+        if self.is_circular:
+            wrap = logical_or(logical_and(x < o, d > tensor([0])), logical_and(o < x, d < tensor([0])))
+            result = where(wrap, result + self.G_0(self.genome_length), result)
         return result
+
+    def g_fun(self, x: Tensor):
+        # Create vector of values of g(x) at the grid points g_xgrid
+        g = cat((dtensor([1.0]), flatten(stack((self.g, ones_like(self.g_delta_scaled)), dim=1))))
+        # Find i where x_grid[i] <= z but x_grid[i+1 > z
+        with no_grad():
+            lt = x[None, ...] < self.g_xgrid[(...,) + (None,) * x.dim()]
+            idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
+        # Return g[i]
+        return g[idx]
+
 
     def surrounding_origins(self, x: Tensor) -> Tuple[Tensor, Tensor]:
         """
