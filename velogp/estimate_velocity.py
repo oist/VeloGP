@@ -173,7 +173,7 @@ class FitVelocityModel:
                       f"log-avg. magnitude={exp(mean(log(abs(gradients[gradients != 0.0])))).item()}")
             if steps is None and (l >= 1.0 - tolerance):
                 if log_steps:
-                    print(f"No further improvement, stopping")
+                    print(f"Improvement does not exceed tolerance ({tolerance}), stopping")
                 break
             elif log_steps:
                 print(f"Improvement factor: {1 / l.item()}")
@@ -264,5 +264,5 @@ class FitVelocityModel:
             print("Finalizing v0, g() and h() until the object cannot be further improved")
         self.run_lbfgs([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
                        lr_start=1.0, lr_end=1.0, iterations=10000, steps=None,
-                       tolerance=0.0, line_search_fn="strong_wolfe",
+                       tolerance=1e-8, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
