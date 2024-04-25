@@ -73,6 +73,8 @@ parser.add_argument("--out-vt", metavar="filename",
                     help="output file for the velocity as a function of time as a tab-separated table")
 parser.add_argument("--out-vx-feature-delays", metavar="filename",
                     help="output file for the delays incurred at each v(x) feature")
+parser.add_argument("--out-trajectories", metavar="filename",
+                    help="output file for the trajectories of the individual replisomes")
 parser.add_argument("--out-stats", metavar="filename",
                     help="output file for fitting statistics")
 parser.add_argument("--plot-abundance", metavar="filename",
@@ -461,6 +463,46 @@ if ARGS.out_vx_feature_delays is not None:
     finally:
         if f is not None:
             f.close()
+
+if ARGS.out_trajectories is not None:
+    print(f"Saving velocity profile and replisome trajectories x(t) to {ARGS.out_trajectories}")
+    f = None
+    try:
+        k = sum([1 for o in ORIGINS if o.chr == SINGLE_CHROMOSOME])
+        # Construct column list and format tuple
+        cols = [('t', np.float64), ('vt', np.float64), ('vt_stderr', np.float64) ]
+        fmt = ('%.5f', '%.5f', '%.5f')
+        cols += [ (f"x.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
+        fmt += ('%.5f',) * (2*k)
+        cols += [ (f"vt.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
+        fmt += ('%.5f',) * (2*k)
+        cols += [ (f"gx.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ] ]
+        fmt += ('%.5f',) * (2*k)
+        # Fill columns, v(t)=v0*h(t) first
+        tab = np.zeros(MODEL.h_tgrid.shape[0], dtype=cols)
+        tab["t"] = MODEL.h_tgrid
+        tab["vt"] = MODEL.v_t(MODEL.h_tgrid).detach()
+        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV_HG, COV_HG_PMAP).detach()
+        # Now fill in x(t), v_r(t)=v0*h(t) / g(x) and g(x) for all replisomes
+        tab_x, tab_v = MODEL.trajectories(MODEL.h_tgrid)
+        for o_i, o in enumerate(ORIGINS):
+            if o.chr != SINGLE_CHROMOSOME:
+                continue
+            for d_i, d in enumerate([ "-", "+" ]):
+                r_i = 2*o_i + d_i
+                tab[f"x.{o.name}{d}"] =  tab_x[:, r_i].detach().numpy()
+                tab[f"gx.{o.name}{d}"] = MODEL.g_fun(tab_x[:, r_i]).detach().numpy()
+                tab[f"vt.{o.name}{d}"] = tab_v[:, r_i].detach().numpy()
+        # Write tab-separated to output file
+        f = open_file(ARGS.out_trajectories, "wt+")
+        f.write("\t".join([name for (name, type) in cols]) + "\n")
+        np.savetxt(f, tab, delimiter="\t", fmt=fmt)
+    except Exception as e:
+        print(f"ERROR: Failed to save {ARGS.out_trajectories}: {e}")
+    finally:
+        if f is not None:
+            f.close()
+
 
 # Save fitting statistics
 if ARGS.out_stats is not None:
