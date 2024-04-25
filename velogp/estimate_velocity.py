@@ -25,11 +25,11 @@ class FitVelocityModel:
             if log_params:
                 for n, p in self.model.named_parameters():
                     if builtins.any([ id(p) == id(pp) for pp in params ]):
-                        print(f"{n}: {p.detach()}")
-                        print(f"grad {n}: {p.grad}")
+                        print(f"{n}: {p.detach().numpy()}")
+                        print(f"grad {n}: {p.grad.detach().numpy()}")
             if log_loss:
-                    print(f"loss_prefactor: {self.loss_prefactor}")
-                    print(f"loss (scaled): {l}")
+                    print(f"loss_prefactor: {self.loss_prefactor.item()}")
+                    print(f"loss (scaled): {l.item()}")
             return l
         return s
 
@@ -56,7 +56,7 @@ class FitVelocityModel:
         except Exception as e:
             print("ERROR: Model evaluation failed, current parameter values are:", file=sys.stderr)
             for n, p in self.model.named_parameters():
-                print(f"Parameter {n}: {p}", file=sys.stderr)
+                print(f"Parameter {n}: {p.detach().numpy()}", file=sys.stderr)
             raise e
         # Compute gradients
         if update_gradients:
@@ -113,22 +113,25 @@ class FitVelocityModel:
         return dtensor(k), dtensor(log_a0)
 
     def run_lbfgs(self, params: List[nn.Parameter], lr_start=0.1, lr_end=0.1, iterations=100,
-                  log_steps=False, log_iterations=False, log_params=False, **kwargs):
-        K = 10
-        RETRY = 5
+                  steps: int | None = 10, retry=5, tolerance=0.0, log_steps=False, log_iterations=False,
+                  log_params=False, **kwargs):
         lossfn = self.parameter_loss_function(params, log_loss_default=log_iterations,
                                               log_params_default=log_params and log_iterations)
-        for i in range(K):
+        max_iter = int(iterations / steps) if (steps is not None) else iterations
+        # Update loss scale so that scaled loss is 1.0
+        with no_grad():
+            if log_steps:
+                print("Initially:")
+            l = lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps)
+            self.loss_prefactor[0] *= l[0]
+        i = 0
+        while (steps is None) or i < steps:
+            i += 1
             # Determine current learning rate
-            lr = lr_start + (lr_end - lr_start) * i / (K - 1)
+            lr = lr_start + (lr_end - lr_start) * (i-1) / (steps - 1) if (steps is not None) and (steps > 1) else lr_end
             # Log step
             if log_steps:
-                print(f"Step {i+1} of {K}, learning rate {lr}")
-            # Update loss scale
-            with no_grad():
-                if log_steps:
-                    print("Before step:")
-                self.loss_prefactor[0] *= lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps)[0]
+                print(f"Step {i}{f'/{steps}' if steps is not None else ''}, learning rate {lr}")
             # Save parameter values
             fm = self.model.flatmap(params)
             p_before = self.model.pvector(params, fm)
@@ -138,7 +141,7 @@ class FitVelocityModel:
                 # Increase attempt count
                 j += 1
                 # Create and run optimizer
-                opt = optim.LBFGS(params, lr=lr, max_iter=int(iterations / K), max_eval=10 * iterations, **kwargs)
+                opt = optim.LBFGS(params, lr=lr, max_iter=max_iter, max_eval=10 * iterations, **kwargs)
                 opt.step(lossfn)
                 # If the parameter are still finite, the step was successfull
                 if all(isfinite(self.model.pvector(params, fm))) and all(isfinite(lossfn(update_gradients=False))):
@@ -147,15 +150,33 @@ class FitVelocityModel:
                 with no_grad():
                     self.model.pvector_assign(params, p_before, fm)
                 # and complain if the number of retries is exceeded
-                if j >= RETRY:
+                if j >= retry:
                     raise RuntimeError("optimization failed")
                 # otherwise and half the learning rate, then try again
                 lr = lr / 2
                 if log_steps:
-                    print(f"Step {i+1} of {K} failed, will make attempt {j+1} with learning rate reduced to {lr}")
+                    print(f"Step {i}{f'/{steps}' if steps is not None else ''} failed, " +
+                          f"will make attempt {j+1} with learning rate reduced to {lr}")
             # Log number of interations done
             if log_steps:
                 print(f"Iterations: {opt.state_dict()['state'][0]['n_iter']}")
+                print("After step:")
+            # Evaluate once more to see improvement
+            l = lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps)
+            gradients = self.model.pgradient(params, fm)
+            with no_grad():
+                self.loss_prefactor[0] *= l[0]
+            # If number of steps is not fixed, stop once there's no improvement
+            if log_steps:
+                print(f"Final gradients: pos={sum(gradients > 0.0)}, neg={sum(gradients < 0)}, zero={sum(gradients == 0.0)}, " +
+                      f"max={max(gradients).item()}, min={min(gradients).item()}, " +
+                      f"log-avg. magnitude={exp(mean(log(abs(gradients[gradients != 0.0])))).item()}")
+            if steps is None and (l >= 1.0 - tolerance):
+                if log_steps:
+                    print(f"No further improvement, stopping")
+                break
+            elif log_steps:
+                print(f"Improvement factor: {1 / l.item()}")
         # Make sure the final values lie within the parameter's domains
         self.model.clamp_parameters()
         return opt
@@ -201,7 +222,7 @@ class FitVelocityModel:
         self.model.v0_log = nn.Parameter(self.model.v0_log)
         self.model.g_delta_scaled = nn.Parameter(self.model.g_delta_scaled)
         self.run_lbfgs([self.model.v0_log, self.model.g_delta_scaled],
-                       lr_start=0.1, lr_end=1.0, iterations=100,
+                       lr_start=0.1, lr_end=1.0, iterations=100, steps=10,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         self.optimized_parameters.append("v0_log")
@@ -224,7 +245,7 @@ class FitVelocityModel:
         self.model.h_switch_basis("eigenbasis_scaled")
         self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
         self.run_lbfgs([ self.model.v0_log, self.model.h_log_raw ],
-                       lr_start=0.1, lr_end=1.0, iterations=100,
+                       lr_start=0.1, lr_end=1.0, iterations=100, steps=10,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         self.optimized_parameters.append("h_log_raw")
@@ -236,12 +257,12 @@ class FitVelocityModel:
         if log_phases:
             print("Optimizing v0, g() and h() simultaneously")
         self.run_lbfgs([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
-                       lr_start=0.1, lr_end=1.0, iterations=1000,
+                       lr_start=0.1, lr_end=1.0, iterations=1000, steps=10,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         if log_phases:
             print("Finalizing v0, g() and h() until the object cannot be further improved")
         self.run_lbfgs([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
-                       lr_start=1.0, lr_end=1.0, iterations=10000,
-                       tolerance_change=1e-8, line_search_fn="strong_wolfe",
+                       lr_start=1.0, lr_end=1.0, iterations=10000, steps=None,
+                       tolerance=0.0, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
