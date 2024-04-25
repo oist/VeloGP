@@ -311,7 +311,7 @@ class VelocityModel(nn.Module):
             for d_i, d in enumerate([-1, 1]):
                 # Compute replisome position in virtual coordinates
                 # TODO: We ignore diffusion here atm
-                z = self.origins[o_i] + d * self.v0 * maximum(self.H(t) - self.H(self.delay[o_i]), dtensor([0.0]))
+                z = self.G_0(self.origins[o_i]) + d * self.v0 * maximum(self.H(t) - self.H(self.delay[o_i]), dtensor([0.0]))
                 if self.is_circular:
                     z = remainder(z, self.genome_length_virtual)
                 # Translate to physical coordinates
