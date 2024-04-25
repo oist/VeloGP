@@ -311,9 +311,9 @@ MODEL.h_timescale[0] = DOUBLINGTIME * ARGS.vt_timescale
 
 # Create loss function
 LOSS = velocity_model.VelocityModelLoss(
-    x=pt.torch.tensor(ABUNDANCE["x"].values, dtype=pt.float64),
-    y_obs=pt.torch.tensor(ABUNDANCE["y_obs"].values, dtype=pt.float64),
-    s_obs=pt.torch.tensor(ABUNDANCE["s_obs"].values, dtype=pt.float64),
+    x=pt.tensor(ABUNDANCE["x"].values, dtype=pt.float64),
+    y_obs=pt.tensor(ABUNDANCE["y_obs"].values, dtype=pt.float64),
+    s_obs=pt.tensor(ABUNDANCE["s_obs"].values, dtype=pt.float64),
     model=MODEL)
 
 # Create fit instance
