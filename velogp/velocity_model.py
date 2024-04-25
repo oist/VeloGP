@@ -349,8 +349,10 @@ class VelocityModel(nn.Module):
                 tab_x[t < d_right, ri_right] = nan
                 tab_v[t < d_right, ri_right] = nan
             # Compute meeting time.
+            # NOTE: Must be carefull on a circular genome with a single origin since G(x, x) == 0
             # TODO: This has to be adapted if G(x,o,d) ever becomes direction-dependent.
-            t_meet = self.Hinv((self.G(o_right, o_left, d=dtensor([1.0]))/self.v0 + self.H(d_left) + self.H(d_right))/2.0)
+            fudge = tensor(1 if self.is_circular and (o_left == o_right).item() else 0, dtype=torch.int32)
+            t_meet = self.Hinv((self.G(o_right - fudge, o_left, d=dtensor([1.0]))/self.v0 + self.H(d_left) + self.H(d_right))/2.0)
             # Blank out origin positions after the meeting time
             if ri_left >= 0:
                 tab_x[t > t_meet, ri_left] = nan
