@@ -171,12 +171,12 @@ class FitVelocityModel:
                 print(f"Final gradients: pos={sum(gradients > 0.0)}, neg={sum(gradients < 0)}, zero={sum(gradients == 0.0)}, " +
                       f"max={max(gradients).item()}, min={min(gradients).item()}, " +
                       f"log-avg. magnitude={exp(mean(log(abs(gradients[gradients != 0.0])))).item()}")
-            if steps is None and (l >= 1.0 - tolerance):
+            if steps is None and (1.0 - l <= tolerance):
                 if log_steps:
-                    print(f"Improvement does not exceed tolerance ({tolerance}), stopping")
+                    print(f"Relative improvement {1.0 - l.item()}  does not exceed tolerance {tolerance}, stopping")
                 break
             elif log_steps:
-                print(f"Improvement factor: {1 / l.item()}")
+                print(f"Relative improvement {1.0 - l.item()}")
         # Make sure the final values lie within the parameter's domains
         self.model.clamp_parameters()
         return opt
@@ -263,6 +263,6 @@ class FitVelocityModel:
         if log_phases:
             print("Finalizing v0, g() and h() until the object cannot be further improved")
         self.run_lbfgs([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
-                       lr_start=1.0, lr_end=1.0, iterations=10000, steps=None,
-                       tolerance=1e-8, line_search_fn="strong_wolfe",
+                       lr_start=1.0, lr_end=1.0, iterations=100, steps=None, retry=30,
+                       tolerance=1e-6, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
