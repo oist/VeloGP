@@ -29,7 +29,8 @@ class SplitAndAdd(argparse.Action):
             values = [ values ]
         for vs in values:
             for v in vs.split(","):
-                getattr(namespace, self.dest, set()).add(v)
+                if len(v) > 0:
+                    getattr(namespace, self.dest, set()).add(v)
 
 def open_file(filename, mode):
     if filename.endswith(".gz"):
@@ -263,7 +264,7 @@ for bed_filename in ARGS.bed:
 
 # Complain if not all names were resolved
 if len(VX_FEATURE_NAMES_TO_BE_RESOLVED) > 0:
-    raise ArgumentError(f"unable to resolve origin names {', '.join(VX_FEATURE_NAMES_TO_BE_RESOLVED)}")
+    raise ArgumentError(f"unable to resolve feature names {', '.join(VX_FEATURE_NAMES_TO_BE_RESOLVED)}")
 if len(ORIGINS_NAMES_TO_BE_RESOLVED) > 0:
     raise ArgumentError(f"unable to resolve origin names {', '.join(ORIGINS_NAMES_TO_BE_RESOLVED)}")
 
@@ -435,8 +436,8 @@ if ARGS.out_vx_feature_delays is not None:
         # Check that we agree on the order of the genomic features...
         assert all(MODEL.g_xranges_l == pt.tensor(list([f.begin for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME]), dtype=pt.int32))
         # Build table
-        chr_slen = max([ len(f.chr) for f in VX_FEATURES ])
-        fn_slen = max([ len(f.name) for f in VX_FEATURES ])
+        chr_slen = max([len("chr")] + [ len(f.chr) for f in VX_FEATURES ])
+        fn_slen = max([len("feature")] + [ len(f.name) for f in VX_FEATURES ])
         cols = [ ('chr', f'U{chr_slen}'), ('begin', np.int32), ('end', np.int32), ('length', np.int32),
                  ('name', f'U{fn_slen}'), ('delayscale', np.float64),
                  ('g', np.float64), ('v_bps', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64), ('delay_s', np.float64) ]
