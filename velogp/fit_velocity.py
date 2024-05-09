@@ -473,7 +473,11 @@ if ARGS.out_trajectories is not None:
         # Construct column list and format tuple
         cols = [('t', np.float64), ('vt', np.float64), ('vt_stderr', np.float64) ]
         fmt = ('%.5f', '%.5f', '%.5f')
+        cols += [ (f"{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
+        fmt += ('%d',) * (2*k)
         cols += [ (f"x.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
+        fmt += ('%.5f',) * (2*k)
+        cols += [ (f"dx.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
         fmt += ('%.5f',) * (2*k)
         cols += [ (f"vt.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
         fmt += ('%.5f',) * (2*k)
@@ -485,13 +489,15 @@ if ARGS.out_trajectories is not None:
         tab["vt"] = MODEL.v_t(MODEL.h_tgrid).detach()
         tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV_HG, COV_HG_PMAP).detach()
         # Now fill in x(t), v_r(t)=v0*h(t) / g(x) and g(x) for all replisomes
-        tab_x, tab_v = MODEL.trajectories(MODEL.h_tgrid)
+        tab_state, tab_x, tab_dx, tab_v = MODEL.trajectories(MODEL.h_tgrid)
         for o_i, o in enumerate(ORIGINS):
             if o.chr != SINGLE_CHROMOSOME:
                 continue
             for d_i, d in enumerate([ "-", "+" ]):
                 r_i = 2*o_i + d_i
+                tab[f"{o.name}{d}"] =  tab_state[:, r_i].detach().numpy()
                 tab[f"x.{o.name}{d}"] =  tab_x[:, r_i].detach().numpy()
+                tab[f"dx.{o.name}{d}"] =  tab_dx[:, r_i].detach().numpy()
                 tab[f"gx.{o.name}{d}"] = MODEL.g_fun(tab_x[:, r_i]).detach().numpy()
                 tab[f"vt.{o.name}{d}"] = tab_v[:, r_i].detach().numpy()
         # Write tab-separated to output file

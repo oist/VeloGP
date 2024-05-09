@@ -274,22 +274,24 @@ class VelocityModel(nn.Module):
 
     @property
     def g_delta(self) -> Tensor:
-        """ The current value of g_delta """
+        """ The current value of g_delta ( = g - 1.0 ) """
         return self.g_delta_scaled * self.g_delta_prefactor
 
     @g_delta.setter
     def g_delta(self, value: Tensor):
+        """ Set g_delta ( = g - 1.0 ) to the specified value """
         assert ((value.dim() == 1) and (value.size(0) == self.g_delta_prefactor.size(0)))
         assert all(value >= dtensor([0.0]))
         self.g_delta_scaled = value / self.g_delta_prefactor
 
     @property
     def g(self) -> Tensor:
-        """ The current value of g """
+        """ The current value of g ( = g_delta + 1.0) """
         return (dtensor([1.0]) + self.g_delta)
 
     @g.setter
     def g(self, value: Tensor):
+        """ Set g ( = g_delta + 1.0) to the specified value """
         assert((value.dim() == 1) and (value.size(0) == self.g_delta_prefactor.size(0)))
         assert all(value >= dtensor([1.0]))
         self.g_delta_scaled = (value - dtensor([1.0])) / self.g_delta_prefactor
@@ -299,26 +301,42 @@ class VelocityModel(nn.Module):
         """ Returns the length of the genome in virtual coordinates """
         return self.genome_length.double() + sum(self.g_delta * self.g_xranges_len)
 
-    def trajectories(self, t: Tensor = None):
+    def replisome_position(self, t: Tensor, origin: Tensor, dir: Tensor, delay: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        # Compute distance travelled in virtual coordinates
+        # TODO: We ignore diffusion here atm
+        z = self.G_0(origin) + dir * self.v0 * maximum(self.H(t) - self.H(delay), dtensor([0.0]))
+        # Translate distance travelled to position (plus wrap-around count)
+        if self.is_circular:
+            z_wrap = div(z, self.genome_length_virtual, rounding_mode="floor")
+            z = remainder(z, self.genome_length_virtual)
+        else:
+            z_wrap = zeros_like(z, dtype=bool)
+            z = max(dtensor([0.0]), min(z, self.genome_length_virtual))
+        # Translate position to physical coordinates
+        x = self.G_0_inv(z)
+        # Translate position and wrap-around count to distance travelled in physical coordinates
+        dx = x - origin
+        dx += self.genome_length * z_wrap
+        # Compute instantaneous velocities
+        v = self.v_t(t) / self.g_fun(x)
+        return x, dx, v
+
+    def trajectories(self, t: Tensor = None) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         # Use grid on which h() is defined if no output times are specified
         if t is None:
             t = self.h_tgrid
         # Create output tensors, one for replisome positions, or for velocities
         k = 2*numel(self.origins)
-        tab_x = zeros(t.shape + (k,))
-        tab_v = zeros(t.shape + (k,))
+        tab_state = ones(t.shape + (k,), dtype=torch.int32)
+        tab_x = zeros(t.shape + (k,), dtype=torch.float64)
+        tab_dx = zeros(t.shape + (k,), dtype=torch.float64)
+        tab_v = zeros(t.shape + (k,), dtype=torch.float64)
         for o_i in builtins.range(0, numel(self.origins)):
             for d_i, d in enumerate([-1, 1]):
-                # Compute replisome position in virtual coordinates
-                # TODO: We ignore diffusion here atm
-                z = self.G_0(self.origins[o_i]) + d * self.v0 * maximum(self.H(t) - self.H(self.delay[o_i]), dtensor([0.0]))
-                if self.is_circular:
-                    z = remainder(z, self.genome_length_virtual)
-                # Translate to physical coordinates
-                x = self.G_0_inv(z)
+                x, dx, v = self.replisome_position(t, origin=self.origins[o_i], dir=d, delay=self.delay[o_i])
                 tab_x[:, 2*o_i + d_i] = x
-                # Output instantaneous velocities
-                tab_v[:, 2*o_i + d_i] = self.v_t(t) / self.g_fun(x)
+                tab_dx[:, 2*o_i + d_i] = dx
+                tab_v[:, 2*o_i + d_i] = v
         # Determine chromosome meeting points
         # Iterate over pairs of replisomes moving towards one another
         # For the first and last origin, there's a pair that wraps around on circular
@@ -341,27 +359,42 @@ class VelocityModel(nn.Module):
             d_left = self.delay[oi_left] if oi_left >= 0 else dtensor([0.0])
             o_right = self.origins[oi_right] if oi_right < numel(self.origins) else self.genome_length
             d_right = self.delay[oi_right] if oi_right< numel(self.origins) else dtensor([0.0])
-            # Blank out replisome positions before replisome creation
+            # Before replisome creation, state = 0, position = origin, distance = 0.0, v = nan
             if ri_left >= 0:
-                tab_x[t < d_left, ri_left] = nan
-                tab_v[t < d_left, ri_left] = nan
+                w = t < d_left
+                tab_state[w, ri_left] = 0
+                tab_x[w, ri_left] = o_left
+                tab_dx[w, ri_left] = 0.0
+                tab_v[w, ri_left] = nan
             if ri_right >= 0:
-                tab_x[t < d_right, ri_right] = nan
-                tab_v[t < d_right, ri_right] = nan
+                w = t < d_right
+                tab_state[w, ri_right] = 0
+                tab_x[w, ri_right] = o_right
+                tab_dx[w, ri_right] = 0.0
+                tab_v[w, ri_right] = nan
             # Compute meeting time.
-            # NOTE: Must be carefull on a circular genome with a single origin since G(x, x) == 0
-            # TODO: This has to be adapted if G(x,o,d) ever becomes direction-dependent.
+            # NOTE: Must be careful on a circular genome with a single origin since G(x, x) == 0
             fudge = tensor(1 if self.is_circular and (o_left == o_right).item() else 0, dtype=torch.int32)
+            # TODO: We ignore diffusion here atm
+            # TODO: This has to be adapted if G(x,o,d) ever becomes direction-dependent.
             t_meet = self.Hinv((self.G(o_right - fudge, o_left, d=dtensor([1.0]))/self.v0 + self.H(d_left) + self.H(d_right))/2.0)
-            # Blank out origin positions after the meeting time
+            x_meet_left, dx_meet_left, _ = self.replisome_position(t_meet, origin=o_left, dir=dtensor([+1.0]), delay=d_left)
+            x_meet_right, dx_meet_right, _ = self.replisome_position(t_meet, origin=o_right, dir=dtensor([-1.0]), delay=d_right)
+            # After replisomes meet, state = 2, position = meeting point, distance = dist. travelled, v = nan
             if ri_left >= 0:
-                tab_x[t > t_meet, ri_left] = nan
-                tab_v[t > t_meet, ri_left] = nan
+                w = t > t_meet
+                tab_state[w, ri_left] = 2
+                tab_x[w, ri_left] = x_meet_left
+                tab_dx[w, ri_left] = dx_meet_left
+                tab_v[w, ri_left] = nan
             if ri_right >= 0:
-                tab_x[t > t_meet, ri_right] = nan
-                tab_v[t > t_meet, ri_right] = nan
+                w = t > t_meet
+                tab_state[w, ri_right] = 2
+                tab_x[w, ri_right] = x_meet_right
+                tab_dx[w, ri_right] = dx_meet_right
+                tab_v[w, ri_right] = nan
         # Remove first row which ri_right to the entry t=0 we added at the top
-        return tab_x, tab_v
+        return tab_state, tab_x, tab_dx, tab_v
 
     def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[str, int]) -> Tensor:
         """
