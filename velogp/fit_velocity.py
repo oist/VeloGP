@@ -479,7 +479,7 @@ if ARGS.out_trajectories is not None:
         fmt += ('%.5f',) * (2*k)
         cols += [ (f"dx.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
         fmt += ('%.5f',) * (2*k)
-        cols += [ (f"vt.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
+        cols += [ (f"v.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
         fmt += ('%.5f',) * (2*k)
         cols += [ (f"gx.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ] ]
         fmt += ('%.5f',) * (2*k)
@@ -498,8 +498,8 @@ if ARGS.out_trajectories is not None:
                 tab[f"{o.name}{d}"] =  tab_state[:, r_i].detach().numpy()
                 tab[f"x.{o.name}{d}"] =  tab_x[:, r_i].detach().numpy()
                 tab[f"dx.{o.name}{d}"] =  tab_dx[:, r_i].detach().numpy()
+                tab[f"v.{o.name}{d}"] = tab_v[:, r_i].detach().numpy()
                 tab[f"gx.{o.name}{d}"] = MODEL.g_fun(tab_x[:, r_i]).detach().numpy()
-                tab[f"vt.{o.name}{d}"] = tab_v[:, r_i].detach().numpy()
         # Write tab-separated to output file
         f = open_file(ARGS.out_trajectories, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
