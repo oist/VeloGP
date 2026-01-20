@@ -943,7 +943,7 @@ class VelocityModelLoss(nn.Module):
     def forward(self) -> Tensor:
         return 0.5 * sum(self.weights * ((self.y_obs - self.y_pred()) ** 2))
 
-    def jacobian(self, params: List[nn.Parameter | str]) -> Tuple[Tensor, Dict[str, nn.Parameter]]:
+    def jacobian(self, params: List[nn.Parameter | str]) -> Tensor:
         params = self.model.resolve_params(params)
         # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i of the
         # jacobian, where n_i is the number of elements of the i-th parameter tensor
