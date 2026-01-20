@@ -63,6 +63,7 @@ class VelocityModel(nn.Module):
             # Baseline velocity
             self.v0_log = log(dtensor([500]))
             # Gaussian process hyperparameters
+            self.h_cov_function = "sqexp"
             self.h_timescale = tensor([1e2], requires_grad=False)
             self.h_sigma = tensor([1.0], requires_grad=False)
             # Grid on which h(t) is defined as a piece-wise constant (right-continuous) function
@@ -744,6 +745,22 @@ class VelocityModel(nn.Module):
         else:
             raise ValueError("invalid basis " + self.h_basis + " or " + basis)
 
+    def h_canonical_covariance(self) -> Tensor:
+        """Evaluates the covariance function for h (actually, h_log_raw) in canonical coordinates"""
+        d = abs(self.h_tgrid[None, :] - self.h_tgrid[:, None]) / self.h_timescale
+        if self.h_cov_function == "sqexp":            
+            return exp(- (d ** 2) / 2)
+        elif self.h_cov_function == "matern1/2":
+            return exp(-d)
+        elif self.h_cov_function == "matern3/2":
+            dp = math.sqrt(3) * d
+            return (1 + dp) * exp(-dp)
+        elif self.h_cov_function == "matern5/2":
+            dp = math.sqrt(5) * d 
+            return (1 + dp + (5/3) * (d**2)) * exp(-dp)
+        else:
+            raise ValueError("invalid covariance function " + self.h_cov_function)
+            
     def h_cov(self, include_sigma=True) -> Tensor:
         """The covariance matrix of (h_log_raw[1], ..., h_log_raw[k])
 
@@ -751,7 +768,7 @@ class VelocityModel(nn.Module):
         :return: the covariance matrix
         """
         if self.h_basis == "canonical":
-            s = exp(-((self.h_tgrid[None, :] - self.h_tgrid[:, None]) ** 2) / (2 * (self.h_timescale ** 2)))
+            s = self.h_canonical_covariance()
             return (self.h_sigma ** 2) * s if include_sigma else s
         elif self.h_basis == "eigenbasis":
             # The basis is orthonormal here, and h_sigma is not included in the eigenvalues
@@ -795,7 +812,7 @@ class VelocityModel(nn.Module):
             # Find eigenvalues and eigenvectors of the symmetric matrix h_cov(). We don't
             # include the pre-factor h_sigma^2 here, this avoids having to recompute things
             # if the prefactor changes.
-            self.h_cov_eig = VelocityModel.Eigenbasis.make(self.h_cov(include_sigma=False))
+            self.h_cov_eig = VelocityModel.Eigenbasis.make(self.h_canonical_covariance())
             self.h_cov_eig_timescale = self.h_timescale
             # Update the non-h_log-dependent prefactor of the multivariate normal density of h_log
             # We thus compute h_prior_prefactor = -log(sqrt[(2pi)^k * |Sigma|]) where
@@ -918,7 +935,6 @@ class VelocityModelLoss(nn.Module):
         assert scale.dim() == self.y_obs.dim()
         assert scale.size()[0] == 1
         return (abd, scale)
-
 
     def y_pred(self) -> Tensor:
         abd, scale = self.abundance_and_scale()
