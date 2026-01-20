@@ -190,6 +190,16 @@ class FitVelocityModel:
             lossfn()
             opt.step()
 
+    def run_newton(self, lr: float=0.1, iterations: int=10):
+#        basis = self.model.h_basis
+#        self.model.h_switch_basis("canonical")
+        p = [self.model.h_log_raw]
+        for i in range(iterations):
+            u = self.loss.newton_step(p)
+            with no_grad():
+                self.model.pvector_assign(p, self.model.pvector(p)*(1-lr) + u*lr)            
+                self.model.clamp_parameters()
+#        self.model.h_switch_basis(basis)
 
     def optimize_parameters(self, log_phases=False, log_steps=False, log_iterations=False, log_params=False):
         self.model.h_switch_basis("canonical")

@@ -964,3 +964,28 @@ class VelocityModelLoss(nn.Module):
             y_pred.backward(inputs=[p for n, p in params], retain_graph=True)
             J[k, :] = self.model.pgradient(params, (c, pmap))
         return J
+
+    def newton_step(self, params: List[nn.Parameter | str]) -> Tensor:
+        # NOTE: This is based on the observation that we expect 
+        #   tilde-Sigma_h dM^T Sigma_y^-1 (y - m) - tilde-Pi_h Theta
+        # to vanish when Theta is a MAP estimate of the parameters.
+        # However, the updates this suggests for Theta do not seem to be reasonable,
+        # it's unclear whether the problem is numerical or or principal issue.
+        # Code left in for now because it may be useful in the future
+        params = self.model.resolve_params(params)
+        # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i of the
+        # jacobian, where n_i is the number of elements of the i-th parameter tensor
+        c, pmap = self.model.flatmap(params)
+        # Compute jacobian dM
+        dM = self.jacobian(params)
+        # Construct covariance matrix tilde-Sigma_h = Sigma_h ^ -1
+        tS_h = zeros(Size([c[-1], c[-1]]), dtype=torch.float64)
+        i, l = pmap["h_log_raw"], numel(self.model.h_log_raw)
+        tS_h[i:(i+l), i:(i+l)] = self.model.h_cov(include_sigma=True)
+        # Compute tSigma_h * dM^T * Sigma_y^-1 * (y - m)
+        r1 = self.weights * ((self.y_obs - self.y_pred()) ** 2)
+        r2 = t(dM) @ r1
+        r3 = tS_h @ r2
+        return r3
+        
+        
