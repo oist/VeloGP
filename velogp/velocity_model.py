@@ -77,6 +77,9 @@ class VelocityModel(nn.Module):
             self.h_tgrid_len.requires_grad = False
             self.h_log_raw = zeros(h_tgrid.size(), dtype=torch.double)
             self.h_basis = "canonical"
+            # Cholesky factorization of covariance matrix of H
+            self.h_cov_cholesky = None
+            self.h_cov_cholesky_timescale = None
             # Eigenbasis of the covariance matrix of H, see update_h_cov_eig()
             self.h_cov_eig = None
             self.h_cov_eig_timescale = None
@@ -145,12 +148,17 @@ class VelocityModel(nn.Module):
             self.h_sigma.clamp_(0.0, math.inf)
             if self.h_basis == "canonical":
                 h_log_raw_scale = self.h_sigma
+            elif self.h_basis == "cov":
+                with no_grad():
+                    h_log_raw_scale = self.h_transform_basis("cov", "canonical", self.h_sigma * ones_like(self.h_log_raw))
             elif self.h_basis == "eigenbasis":
                 with no_grad():
                     h_log_raw_scale = self.h_sigma * sqrt(self.h_eigenvalues())
             elif self.h_basis == "eigenbasis_scaled":
                 with no_grad():
                     h_log_raw_scale = dtensor([1.0])
+            else:
+                raise RuntimeError("unknown basis " + self.h_basis)
             assert all(isfinite(self.h_log_raw))
             self.h_log_raw.clamp_(-10 * h_log_raw_scale, 10 * h_log_raw_scale)
 
@@ -487,6 +495,12 @@ class VelocityModel(nn.Module):
         if self.h_basis == "canonical":
             # The posterior covariance matrix is already expressed in the canonical basis
             d = diagonal(h_log_raw_posterior_cov)
+        elif self.h_basis == "cov":
+            # The posterior covariance matrix S applies to h_log_raw = Sigma^{-1} h_log, see h_switch_basis().
+            # The covariance of h_log = Sigma h_log_raw is therefore Sigma S Sigma^T. Since Sigma is symmetric,
+            # Sigma^T = Sigma.
+            h = self.h_cov_cannonical()
+            d = diagonal(matmul(matmul(h, h_log_raw_posterior_cov), h))
         elif self.h_basis == "eigenbasis":
             # The posterior covariance matrix S applies to h_log_raw = M^T h_log, see h_switch_basis().
             # The covariance of h_log = M h_log_raw is therefore M S M^T.
@@ -695,22 +709,26 @@ class VelocityModel(nn.Module):
         The represented h_log stays the same, i.e. h_log("canonical") does not change (except for numerical error).
 
         The different bases are defined in the following way. Let Sigma be the covariance matrix of h_log,
-        i.e. of the vector [ log(h(h_tgrid[1])), ..., log(h(h_tgrid[k])) ]. Let further M be an orthonormal
-        matrix and L=diag(l[1],... , l[n]) be a diagonal matrix such that Sigma = h_sigma^2 M^T L M. The possible
-        bases are then:
+        i.e. of the vector [ log(h(h_tgrid[1])), ..., log(h(h_tgrid[k])) ] where we assume that by construction
+        diag(Sigma) = (h_sigma^2, ..., h_sigma^2). Let further M be an orthonormal matrix and L=diag(l[1],... , l[n])
+        be a diagonal matrix such that Sigma = h_sigma^2 M L M^T and thus Sigma^-1 = M L^-1 M^T / h_sigma^2.
+        The possible bases are then:
 
-        (1) 'canonical'. log(h(t)) is represented by the vector h_log_raw = h_log. The vector h_log_raw = h_log
-        has distribution N(0, Sigma) in this case.
+        (1) 'canonical'. log(h(t)) is represented by the vector h_log_raw = h_log. The vector h_log_raw = h_log has
+        distribution N(0, Sigma) in this case.
 
-        (2) 'eigenbasis'. log(h(t)) is represented by the vector h_log_raw = M^T h_log. The vector h_log_raw
-        has distribution N(0, h_sigma^2 L) in this case.
+        (2) 'cov'. log(h(t)) is represented by the vector h_log_raw = Sigma^{-1} h_log. The vector h_log_raw has
+        distribution N(0, Sigma^{-1}) in this case.
 
-        (3) 'eigenbasis_scaled'. log(h(t)) is represented by the vector h_log_raw = (1/h_sigma^2) L^(-1/2) M^T.
+        (3) 'eigenbasis'. log(h(t)) is represented by the vector h_log_raw = M^T h_log. The vector h_log_raw has
+        distribution N(0, h_sigma^2 L) in this case.
+
+        (4) 'eigenbasis_scaled'. log(h(t)) is represented by the vector h_log_raw = L^(-1/2) M^T h_log / h_sigma.
         The vector h_log_raw has distribution N(0, I) in this case. Here, 'I' denotes the identity matrix, and
         L^(-1/2) = diag(1/sqrt(l[1]),...,1/sqrt(l[n])) denotes the inverse of the square root of the (diagonal!)
         matrix L.
 
-        :param newbasis: The basis to switch to ('canonical' or 'eigenbasis' or 'eigenbasis_scaled')
+        :param newbasis: The basis to switch to ('canonical', 'cov', 'eigenbasis' or 'eigenbasis_scaled')
         """
         if self.h_basis != newbasis:
             with no_grad():
@@ -720,7 +738,49 @@ class VelocityModel(nn.Module):
                     self.h_log_raw = self.h_log(newbasis)
             self.h_basis = newbasis
 
-    def h_log(self, basis: str):
+    def h_transform_basis(self, basis: str, current_basis: str, current_h_log: Tensor) -> Tensor:
+        """Transforms the vector current_h_log from current_basis to basis.
+
+        See `h_switch_basis` for a discussion of the possible bases.
+
+        :param basis: The basis to transform to
+        :param current_basis: The current basis
+        :param current_h_log: The current h_log_raw        
+        :return: The vector log(h(h_tgrid)) in the specified basis
+        """
+        if (current_basis == "canonical") and (basis == "cov"):
+            return cholesky_solve(current_h_log.reshape(-1, 1), self.h_cov_cannonical_cholesky()).reshape(-1)
+        elif (current_basis == "canonical") and (basis == "eigenbasis"):
+            return matmul(current_h_log, self.h_eigenbasis())
+        elif (current_basis == "canonical") and (basis == "eigenbasis_scaled"):
+            return matmul(current_h_log, self.h_eigenbasis()) / (self.h_sigma * sqrt(self.h_eigenvalues()))
+        elif (current_basis == "cov") and (basis == "canonical"):
+            return matmul(self.h_cov_cannonical(), current_h_log)
+        elif (current_basis == "cov") and (basis == "eigenbasis"):
+            return self.h_transform_basis("eigenbasis", "canonical", h_log("canonical"))
+        elif (current_basis == "cov") and (basis == "eigenbasis_scaled"):
+            return self.h_transform_basis("eigenbasis_scaled", "canonical",
+                                          self.h_transform_basis("canonical", "cov", current_h_log))
+        elif (current_basis == "eigenbasis") and (basis == "canonical"):
+            return matmul(self.h_eigenbasis(), current_h_log)
+        elif (current_basis == "eigenbasis") and (basis == "eigenbasis_scaled"):
+            return current_h_log / (self.h_sigma * sqrt(self.h_eigenvalues()))
+        elif (current_basis == "eigenbasis") and (basis == "cov"):
+            return h_transform_basis("cov", "canonical",
+                                     h_transform_basis("canonical", "eigenbasis", current_h_log))
+        elif (current_basis == "eigenbasis_scaled") and (basis == "canonical"):
+            return matmul(self.h_eigenbasis(), current_h_log * self.h_sigma * sqrt(self.h_eigenvalues()))
+        elif (current_basis == "eigenbasis_scaled") and (basis == "eigenbasis"):
+            return current_h_log * self.h_sigma * sqrt(self.h_eigenvalues())
+        elif (current_basis == "eigenbasis_scaled") and (basis == "cov"):
+            return self.h_transform_basis("cov", "canonical",
+                                          self.h_transform_basis("canonical", "eigenbasis_scaled", current_h_log))
+        elif current_basis == basis:
+            return current_h_log
+        else:
+            raise ValueError("invalid basis " + current_basis + " or " + basis)
+
+    def h_log(self, basis: str) -> Tensor:
         """Returns the vector log(h(h_tgrid)) in the requested basis.
 
         See `h_switch_basis` for a discussion of the possible bases.
@@ -728,24 +788,9 @@ class VelocityModel(nn.Module):
         :param basis: The basis to return log(h(h_tgrid)) in, either 'canonical' or 'eigenbasis'
         :return: The vector log(h(h_tgrid)) in the specified basis
         """
-        if (self.h_basis == "canonical") and (basis == "eigenbasis"):
-            return matmul(self.h_log_raw, self.h_eigenbasis())
-        elif (self.h_basis == "canonical") and (basis == "eigenbasis_scaled"):
-            return matmul(self.h_log_raw, self.h_eigenbasis()) / (self.h_sigma * sqrt(self.h_eigenvalues()))
-        elif (self.h_basis == "eigenbasis") and (basis == "canonical"):
-            return matmul(self.h_eigenbasis(), self.h_log_raw)
-        elif (self.h_basis == "eigenbasis_scaled") and (basis == "canonical"):
-            return matmul(self.h_eigenbasis(), self.h_log_raw * self.h_sigma * sqrt(self.h_eigenvalues()))
-        elif (self.h_basis == "eigenbasis" and (basis == "eigenbasis_scaled")):
-            return self.h_log_raw / (self.h_sigma * sqrt(self.h_eigenvalues()))
-        elif (self.h_basis == "eigenbasis_scaled" and (basis == "eigenbasis")):
-            return self.h_log_raw * self.h_sigma * sqrt(self.h_eigenvalues())
-        elif self.h_basis == basis:
-            return self.h_log_raw
-        else:
-            raise ValueError("invalid basis " + self.h_basis + " or " + basis)
-
-    def h_canonical_covariance(self) -> Tensor:
+        return self.h_transform_basis(basis, self.h_basis, self.h_log_raw)
+    
+    def h_cov_cannonical(self) -> Tensor:
         """Evaluates the covariance function for h (actually, h_log_raw) in canonical coordinates"""
         d = abs(self.h_tgrid[None, :] - self.h_tgrid[:, None]) / self.h_timescale
         if self.h_cov_function == "sqexp":            
@@ -760,7 +805,27 @@ class VelocityModel(nn.Module):
             return (1 + dp + (5/3) * (d**2)) * exp(-dp)
         else:
             raise ValueError("invalid covariance function " + self.h_cov_function)
-            
+
+    def update_h_cholesky(self):
+        """Recompute cholesky factorization of self.h_cov_cannonical()"""
+        if (self.h_cov_cholesky is None) or (self.h_cov_cholesky_timescale != self.h_timescale):     
+            # Changing the time-scale changes the cholesky factorization, so to keep h_log the same
+            # in the canonical basis (which is the representation we ultimately care about)
+            # we switch to the canonical basis before changing h_cov_cholesky.
+            basis = self.h_basis
+            self.h_switch_basis("canonical")
+            # Find cholesky factorization of the symmetric matrix h_cov(). We don't
+            # include the pre-factor h_sigma^2 here, this avoids having to recompute things
+            # if the prefactor changes.
+            self.h_cov_cholesky = linalg.cholesky(self.h_cov_cannonical())
+            self.h_cov_cholesky_timescale = self.h_timescale
+            # Switch back to the original basis
+            self.h_switch_basis(basis)            
+
+    def h_cov_cannonical_cholesky(self) -> Tensor:
+        self.update_h_cholesky()
+        return self.h_cov_cholesky
+    
     def h_cov(self, include_sigma=True) -> Tensor:
         """The covariance matrix of (h_log_raw[1], ..., h_log_raw[k])
 
@@ -768,7 +833,7 @@ class VelocityModel(nn.Module):
         :return: the covariance matrix
         """
         if self.h_basis == "canonical":
-            s = self.h_canonical_covariance()
+            s = self.h_cov_cannonical()
             return (self.h_sigma ** 2) * s if include_sigma else s
         elif self.h_basis == "eigenbasis":
             # The basis is orthonormal here, and h_sigma is not included in the eigenvalues
@@ -779,7 +844,7 @@ class VelocityModel(nn.Module):
             s = diagflat(ones_like(self.h_eigenvalues()))
             return s  / (self.h_sigma ** 2) if not include_sigma else s
         else:
-            raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
+            raise ValueError("unsupported basis " + self.h_basis)
 
     def h_cov_inv(self, include_sigma=True) -> Tensor:
         """The inverse of the covariance matrix of (h_log_raw[1], ..., h_log_raw[k])
@@ -790,6 +855,9 @@ class VelocityModel(nn.Module):
         if self.h_basis == "canonical":
             s = einsum("ij,j,kj->ik", self.h_eigenbasis(), dtensor([1.0]) / self.h_eigenvalues(), self.h_eigenbasis())
             return s / (self.h_sigma ** 2) if include_sigma else s
+        elif self.h_basis == "cov":
+            s = self.h_cov_cannonical()
+            return s * (self.h_sigma ** 2) if include_sigma else s
         elif self.h_basis == "eigenbasis":
             # The basis is orthonormal here, and h_sigma is not included in the eigenvalues
             s = diagflat(dtensor([1.0]) / self.h_eigenvalues())
@@ -799,7 +867,7 @@ class VelocityModel(nn.Module):
             s = diagflat(ones_like(self.h_eigenvalues()))
             return s * (self.h_sigma ** 2) if not include_sigma else s
         else:
-            raise ValueError("invalid basis " + self.h_basis + " or " + self.h_basis)
+            raise ValueError("unsupported basis " + self.h_basis)
 
     def update_h_cov_eig(self):
         """Recompute the eigenvalues and eigenvectors of self.h_cov()"""
@@ -812,7 +880,7 @@ class VelocityModel(nn.Module):
             # Find eigenvalues and eigenvectors of the symmetric matrix h_cov(). We don't
             # include the pre-factor h_sigma^2 here, this avoids having to recompute things
             # if the prefactor changes.
-            self.h_cov_eig = VelocityModel.Eigenbasis.make(self.h_canonical_covariance())
+            self.h_cov_eig = VelocityModel.Eigenbasis.make(self.h_cov_cannonical())
             self.h_cov_eig_timescale = self.h_timescale
             # Update the non-h_log-dependent prefactor of the multivariate normal density of h_log
             # We thus compute h_prior_prefactor = -log(sqrt[(2pi)^k * |Sigma|]) where
@@ -848,21 +916,29 @@ class VelocityModel(nn.Module):
 
         Returns the negative log of the probability (or, rather, density) of self.h_log as a sample
         of a multivariate Gaussian distribution with mean zero and covariance matrix
-        self.h_sigma^2 *  self.h_cov().
+        self.h_sigma^2 * self.h_cov_cannonical().
 
-        :param hdependent_only: Whether to return the full density, or only the h_log-dependent terms
+        :param hyperparameter_dependence: Whether to return the full density, or only the h_log-dependent terms
         """
         # In the eigenbasis, the covariance matrix diagonalizes, so we just sum the squared entries of h_log
-        # (since the expected value is zero) scaled by the diagonal element (the eigenvector). Have to manually
+        # (since the expected value is zero) scaled by the diagonal element (the eigenvalue). Have to manually
         # add the h_sigma pre-factor since we left that out when computing the covariance matrix.
         # NOTE: The h_prior_prefactor also includes terms for those eigenvalues which were included
         # from the Eigenbasis because they lie below the variance threshold. Here, we don't explicitly account
         # for these components, which amounts to treating them as being zero (and thus they don't contribute
         # to the squared-distance from the mean)
-        self.update_h_cov_eig()
-        r = self.h_prior_prefactor if hyperparameter_dependence else 0
-        r += 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2)
-        return r
+        if (self.h_basis == "cov"):
+            self.update_h_cov_cholesky()
+            if hyperparameter_dependence:
+                raise RuntimeError("hyperparameter_dependence currently unsupported for basis " + self.h_basis)
+            r = zeros(1)
+            r += 0.5 * sum(self.h_log_raw * matmul(self.h_cov_cannonical(), self.h_log_raw))
+            return r
+        else:
+            self.update_h_cov_eig()
+            r = self.h_prior_prefactor if hyperparameter_dependence else zeros(1)
+            r += 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2)
+            return r
 
     def prior_gdelta(self, hyperparameter_dependence):
         """The prior log-probability of self.g_delta as a realization of independent Gaussians
