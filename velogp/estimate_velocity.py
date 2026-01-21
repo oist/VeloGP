@@ -40,12 +40,6 @@ class FitVelocityModel:
         # Clamp parameters to their domain before each iteration
         self.model.clamp_parameters()
         # Evaluate loss and gradients
-        # Update eigenbasis for current hyperparameters in a no-grad context,
-        # this avoids doing the update in an autograd context later which is
-        # unnecessary and could cause problems
-        with no_grad():
-            self.model.update_h_cov_eig()
-            self.model.update_h_cov_chol()
         # Zero gradients
         if update_gradients:
             for p in params:
