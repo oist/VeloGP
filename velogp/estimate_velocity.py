@@ -45,6 +45,7 @@ class FitVelocityModel:
         # unnecessary and could cause problems
         with no_grad():
             self.model.update_h_cov_eig()
+            self.model.update_h_cov_chol()
         # Zero gradients
         if update_gradients:
             for p in params:
