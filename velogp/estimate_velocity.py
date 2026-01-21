@@ -53,7 +53,7 @@ class FitVelocityModel:
                     p.grad.zero_()
         # Compute loss
         try:
-            l = (self.loss() + reduce(operator.add, [self.model.prior(p, False) for p in params])) / self.loss_prefactor
+            l = self.loss() / self.loss_prefactor
         except Exception as e:
             print("ERROR: Model evaluation failed, current parameter values are:", file=sys.stderr)
             for n, p in self.model.named_parameters():
@@ -63,39 +63,6 @@ class FitVelocityModel:
         if update_gradients:
             l.backward()
         return l
-
-    def parameter_posterior_cov_inv(self, params=None, ignore_priors=False):
-        if params is None:
-            params = self.optimized_parameters
-        _, pmap = self.model.flatmap(params)
-        dM = self.loss.jacobian(params)
-        # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
-        u = einsum("ji,j,jk->ik", dM, self.loss.weights, dM).clone()
-        if not ignore_priors:
-            # Add Sigma_h^-1 for h_log_raw, which has a GP prior
-            # We do this by querying the parameter map to find the
-            # sub-matrix of u that corresponds to the parameter h_log_raw,
-            # and adding the inverse of its prior covariance matrix
-            if "h_log_raw" in pmap:
-                i, l = pmap["h_log_raw"], numel(self.model.h_log_raw)
-                u[i:(i+l), i:(i+l)] += self.model.h_cov_inv(include_sigma=True)
-            # Add prior for g_delta
-            # NOTE: This is only a very rough approximation since the prior
-            # on g_delta IS NOT Gaussian.
-            if "g_delta_scaled" in pmap:
-                i, l = pmap["g_delta_scaled"], numel(self.model.g_delta_scaled)
-                u[i:(i+l), i:(i+l)] += diagflat(dtensor([1.0]) / self.model.g_delta_prefactor ** 2)
-        return u, pmap
-
-    def parameter_posterior_cov(self, params=None, ignore_priors=False):
-        u, pmap = self.parameter_posterior_cov_inv(params=params, ignore_priors=ignore_priors)
-        eb = VelocityModel.Eigenbasis.make(u)
-        uinv = einsum("ij,j,kj->ik", eb.eigenvectors, tensor([1.0]) / eb.eigenvalues, eb.eigenvectors)
-        return uinv, pmap
-
-    def h_sigma_lengthscale_loss_function(self, optimizer):
-        def s():
-            raise "Implement me"
 
     def local_fit(self, origin : Tensor, neighbourhood : int):
         # We use that A(d) = A(o) * exp(- k * |d|) where k = lambda/v, o is

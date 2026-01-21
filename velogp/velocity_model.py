@@ -162,7 +162,7 @@ class VelocityModel(nn.Module):
             assert all(isfinite(self.h_log_raw))
             self.h_log_raw.clamp_(-10 * h_log_raw_scale, 10 * h_log_raw_scale)
 
-    def resolve_params(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]]) -> List[Tuple[str, nn.Parameter]]:
+    def resolve_params(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]], strict=True) -> List[Tuple[str, nn.Parameter]]:
         """ Converts a list of either `nn.Parameter` instances *or* parameter names into a list of (name, `nn.Parameter`) tuples """
 
         # Return unmodified parameter list if it is already resolved
@@ -177,10 +177,12 @@ class VelocityModel(nn.Module):
         # Return list of (`str`, `nn.Parameter`) tuples
         r = []
         for p in params:
-            if isinstance(p, nn.Parameter):
+            if isinstance(p, nn.Parameter) and id(p) in nmap:
                 r.append((nmap[id(p)], p))
-            else:
+            elif p in pmap:
                 r.append((p, pmap[p]))
+            elif strict:
+                raise RuntimeError("Parameter " + p + " does not exist")
         return r
 
     def flatmap(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]]) -> Tuple[List[int], Dict[str, int]]:
@@ -197,7 +199,7 @@ class VelocityModel(nn.Module):
         pmap = { ni: ci for (ci, (ni, pi)) in zip(c[:-1], params) }
         return c, pmap
 
-    def pvector(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]], fm = None) -> Tensor:
+    def pvector(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]], flatmap: Tuple[List[int], Dict[str, int]] | None = None) -> Tensor:
         """
         Returns a flat vector containing the current values of the specified parameters
         :param params: List of nn.Parameter instances, parameter names, or (name, nn.Parameter) tuples
@@ -207,10 +209,10 @@ class VelocityModel(nn.Module):
 
         # Obtain parameter map
         params = self.resolve_params(params)
-        if fm is None:
+        if flatmap is None:
             c, pmap = self.flatmap(params)
         else:
-            c, pmap = fm
+            c, pmap = flatmap
 
         # Create output vector and assign values
         r = zeros(Size([c[-1]]), dtype=torch.float64)
@@ -219,7 +221,7 @@ class VelocityModel(nn.Module):
             r[ci:(ci + ni)] = pi
         return r
 
-    def pvector_assign(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]], values : Tensor, fm = None):
+    def pvector_assign(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]], values : Tensor, flatmap = None):
         """
         Assigns values to the specified parameters taken from the flat parameter vector `values`
         :param params: List of nn.Parameter instances, parameter names, or (name, nn.Parameter) tuples
@@ -228,10 +230,10 @@ class VelocityModel(nn.Module):
 
         # Obtain parameter map
         params = self.resolve_params(params)
-        if fm is None:
+        if flatmap is None:
             c, pmap = self.flatmap(params)
         else:
-            c, pmap = fm
+            c, pmap = flatmap
 
         # Assign values from input vector
         assert(values.dim() == 1 and values.size(0) == c[-1])
@@ -239,7 +241,7 @@ class VelocityModel(nn.Module):
             ni = numel(pi)
             pi[:] = values[ci:(ci + ni)]
 
-    def pgradient(self, params: List[nn.Parameter], fm = None) -> Tensor:
+    def pgradient(self, params: List[nn.Parameter], flatmap = None) -> Tensor:
         """
         Returns a flat vector containing the gradients of the specified parameters
         :param params: List of nn.Parameter instances, parameter names, or (name, nn.Parameter) tuples
@@ -249,10 +251,10 @@ class VelocityModel(nn.Module):
 
         # Obtain parameter map
         params = self.resolve_params(params)
-        if fm is None:
+        if flatmap is None:
             c, pmap = self.flatmap(params)
         else:
-            c, pmap = fm
+            c, pmap = flatmap
 
         # Create output vector and assign gradients
         g = zeros(Size([c[-1]]), dtype=torch.float64)
@@ -405,7 +407,7 @@ class VelocityModel(nn.Module):
         # Remove first row which ri_right to the entry t=0 we added at the top
         return tab_state, tab_x, tab_dx, tab_v
 
-    def v_t_posterior_stderr(self, t: Tensor, posterior_cov: Tensor, pmap: Dict[str, int]) -> Tensor:
+    def v_t_posterior_stderr(self, t: Tensor, loss) -> Tensor:
         """
         The standard deviation of the posterior distribution of v(t)
 
@@ -434,6 +436,7 @@ class VelocityModel(nn.Module):
         :return: A tensor containing the posterior standard deviation of v(t) at times `t`
         """
 
+        posterior_cov, pmap = loss.posterior_cov(["h_log_raw"])
         if "v0_log" in pmap:
             print("WARNING: Parameter v0_scaled should be excluded from the covariance " +
                   "matrix used with v_t_posterior_stderr(), otherwise the posterior std. " +
@@ -464,7 +467,7 @@ class VelocityModel(nn.Module):
             lt = t[None, ...] < h_tgrid_augmented[(...,) + (None,) * t.dim()]
             return argmax(lt.view(torch.int8), dim=0) - tensor([1])
 
-    def h(self, t: Tensor) -> Tensor:
+    def h(self, t: Tensor, interpolate=True) -> Tensor:
         """Evaluates h(t) at the specified points t
 
         h(t) is right-continuous and piece-wise constant on the (fixed) grid h_tgrid and obeys h(h_tgrid[i]) = h[i].
@@ -473,6 +476,11 @@ class VelocityModel(nn.Module):
         :return: h(t) as a tensor of the same shape as t
         """
         return exp(self.h_log("canonical")[self.h_indices(t)])
+
+    def h_interpolate(self, t: Tensor) -> Tensor:
+        s = zeros(numel(self.h_tgrid), numel(self.h_tgrid))
+        s += self.h_sigma**2 * self.h_cov_reduced_canonical()
+        s += inverse()
 
     def h_posterior_stderr(self, times: Tensor, h_log_raw_posterior_cov: Tensor) -> Tensor:
         """
@@ -990,7 +998,7 @@ class VelocityModel(nn.Module):
 
     def prior(self, parameter, hyperparameter_dependence):
         if parameter is self.v0_log:
-            return 0
+            return zeros([])
         elif parameter is self.h_log_raw:
             return self.prior_hlog(hyperparameter_dependence=hyperparameter_dependence)
         elif parameter is self.g_delta_scaled:
@@ -999,9 +1007,10 @@ class VelocityModel(nn.Module):
             raise RuntimeError("no prior defined for this parameter")
 
 class VelocityModelLoss(nn.Module):
-    def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel):
+    def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel, params: List[nn.Parameter]):
         super().__init__()
         self.model = model
+        self.params = params
         self.x = x
         self.x.requires_grad = False
         self.x_prep = self.model.prepare_input(self.x)
@@ -1029,9 +1038,51 @@ class VelocityModelLoss(nn.Module):
         return scale * abd
 
     def forward(self) -> Tensor:
-        return 0.5 * sum(self.weights * ((self.y_obs - self.y_pred()) ** 2))
+        l = 0.5 * sum(self.weights * ((self.y_obs - self.y_pred()) ** 2))
+        for n, p in self.model.resolve_params(self.params, strict=False):
+            l += self.model.prior(p, False).reshape(())
+        return l
 
-    def jacobian(self, params: List[nn.Parameter | str]) -> Tensor:
+    def posterior_cov_inv(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]] | None,
+                          ignore_priors=False) -> Tuple[Tensor, Dict[str, int]]:
+        # Get parameters
+        if params is None:
+            params = self.params
+        # Obtain jacobian for parameters
+        dM, pmap = self.jacobian(params=params)
+        # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
+        u = einsum("ji,j,jk->ik", dM, self.weights, dM).clone()
+        if not ignore_priors:
+            # Add Sigma_h^-1 for h_log_raw, which has a GP prior
+            # We do this by querying the parameter map to find the
+            # sub-matrix of u that corresponds to the parameter h_log_raw,
+            # and adding the inverse of its prior covariance matrix
+            if "h_log_raw" in pmap:
+                i, l = pmap["h_log_raw"], numel(self.model.h_log_raw)
+                u[i:(i+l), i:(i+l)] += self.model.h_cov_inv(include_sigma=True)
+            # Add prior for g_delta
+            # NOTE: This is only a very rough approximation since the prior
+            # on g_delta IS NOT Gaussian.
+            if "g_delta_scaled" in pmap:
+                i, l = pmap["g_delta_scaled"], numel(self.model.g_delta_scaled)
+                u[i:(i+l), i:(i+l)] += diagflat(dtensor([1.0]) / self.model.g_delta_prefactor ** 2)
+        return u, pmap
+
+    def posterior_cov(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]] | None,
+                      pmap: Dict[str, int] | None = None,
+                      ignore_priors=False) -> Tuple[Tensor, Dict[str, int]]:
+        # Obtain inverse posterior cov matrix
+        u, pmap = self.posterior_cov_inv(params=params, ignore_priors=ignore_priors)
+        # Invert
+        eb = VelocityModel.Eigenbasis.make(u)
+        uinv = einsum("ij,j,kj->ik", eb.eigenvectors, tensor([1.0]) / eb.eigenvalues, eb.eigenvectors)
+        return uinv, pmap
+    
+    def jacobian(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]] | None) -> [Tensor, Dict[str, int]]:
+        # Get parameters
+        if params is None:
+            params = self.params
+        # Resolve parameters
         params = self.model.resolve_params(params)
         # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i of the
         # jacobian, where n_i is the number of elements of the i-th parameter tensor
@@ -1051,7 +1102,7 @@ class VelocityModelLoss(nn.Module):
             y_pred = scale * self.model(self.x[k])
             y_pred.backward(inputs=[p for n, p in params], retain_graph=True)
             J[k, :] = self.model.pgradient(params, (c, pmap))
-        return J
+        return J, pmap
 
     def newton_step(self, params: List[nn.Parameter | str]) -> Tensor:
         # NOTE: This is based on the observation that we expect 
