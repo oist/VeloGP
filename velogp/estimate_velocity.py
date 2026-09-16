@@ -17,7 +17,6 @@ class FitVelocityModel:
         self.loss = loss
         self.loss_prefactor = dtensor([1.0])
         self.loss_prefactor.requires_grad = False
-        self.optimized_parameters = []
 
     def parameter_loss_function(self, params: List[nn.Parameter], log_params_default=False, log_loss_default=False):
         def s(update_gradients=True, log_params=log_params_default, log_loss=log_loss_default):
@@ -152,6 +151,15 @@ class FitVelocityModel:
             lossfn()
             opt.step()
 
+    def run_adam(self, params: List[nn.Parameter], lr_start=0.001, lr_end=0.001, iterations=1000,
+                 log_iterations=False, log_params=False, **kwargs):
+        lossfn = self.parameter_loss_function(params, log_loss_default=log_iterations,
+                                              log_params_default=log_params and log_iterations)
+        for i in range(iterations):
+            opt = optim.Adam(params, lr=lr_start + (lr_end - lr_start) * i / (iterations-1), **kwargs)
+            lossfn()
+            opt.step()
+    
     def run_newton(self, lr: float=0.1, iterations: int=10):
 #        basis = self.model.h_basis
 #        self.model.h_switch_basis("canonical")
@@ -163,9 +171,7 @@ class FitVelocityModel:
                 self.model.clamp_parameters()
 #        self.model.h_switch_basis(basis)
 
-    def optimize_parameters(self, log_phases=False, log_steps=False, log_iterations=False, log_params=False):
-        self.model.h_switch_basis("canonical")
-        # I. Find origin delays
+    def initialize_v0_delays(self):
         # Fit A(d) = A(o) * exp(- k * |d|) where k = lambda/v locally. Then
         # use the global relationship A(o) = A_max * exp(- lambda * delta_o)
         # between the abundances A(o) at different. origins o and the firing
@@ -180,6 +186,57 @@ class FitVelocityModel:
         with no_grad():
             self.model.delay[:] = (max(origin_loga0) - origin_loga0) / self.model.growthrate
             self.model.v0 = mean(origin_v)
+
+    def run_stochastic(self, params: List[nn.Parameter], steps, perturb_start=1.0, perturb_end=0.01,
+                       log_steps=False, log_iterations=False, log_params=False):
+        for s in range(0, steps):
+            # Compute perturbation strength for the current step
+            perturb = perturb_start * (perturb_end / perturb_start) ** (s/(steps-1)) if steps > 1 else perturb_start
+            # Evaluate loss & log
+            loss_before = self.parameter_loss_function(params, update_gradients=False) * self.loss_prefactor
+            # Perturb parameters
+            pv_before = self.model.pvector(params)
+            for p in self.model.params:
+                with no_grad():
+                    p[:] = p*(1 - perturb) + self.model.prior_dist(p).sample(p.size())*perturb
+            # Optimize                    
+            self.run_lbfgs(params, lr_start=0.1, lr_end=1.0, iterations=100, steps=1,
+                           tolerance_change=-math.inf, line_search_fn="strong_wolfe",
+                           log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
+            # Evaluate loss again
+            loss = self.parameter_loss_function(params, update_gradients=False) * self.loss_prefactor
+            # Accept if the loss improved
+            if loss > loss_before:
+                if log_steps:
+                    print(f"Step {s} (reject): loss={loss_before} -> {loss}, perturb={perturb}")
+                self.model.pvector_assign(pv)
+            elif log_steps:
+                 print(f"Step {s} (accept): loss={loss_before} -> {loss}, perturb={perturb}")
+                
+
+    def optimize_parameters_stochastic(self, log_phases=False, log_steps=False, log_iterations=False, log_params=False):
+        # I. Find origin delays
+        if log_phases:
+            print("Determining initial estimates for v0 and delay")
+        self.initialize_v0_delays()
+        # II. Stochastic optimization
+        self.h_switch_basis("eigenbasis_scaled")
+        self.model.v0_log = nn.Parameter(self.model.v0_log)
+        self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
+        self.model.h_log_raw.zero_()
+        self.model.g_delta_scaled = nn.Parameter(self.model.g_delta_scaled)
+        self.model.g_delta_scaled.zero_()
+        if log_phases:
+            print("Stochastic optimization of v0, h(t) and g(x)")
+        self.run_stochastic([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
+                            log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
+        
+    
+    def optimize_parameters(self, log_phases=False, log_steps=False, log_iterations=False, log_params=False):
+        # I. Find origin delays
+        if log_phases:
+            print("Determining initial estimates for v0 and delay")
+        self.initialize_v0_delays()
         # II. Optimize g()
         # We first optimize v0 and the spatial delays since these are easier to fit.
         # We start with a small learning rate because L-BGFS is otherwise prone to making
@@ -197,8 +254,6 @@ class FitVelocityModel:
                        lr_start=0.1, lr_end=1.0, iterations=100, steps=10,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
-        self.optimized_parameters.append("v0_log")
-        self.optimized_parameters.append("g_delta_scaled")
         # III. Optimize h()
         # Next we make a first optimization pass for h() were we keep v0 and g()
         # fixed, and find a rough fit for h(). We do this in the scaled eigenbasis
@@ -220,7 +275,6 @@ class FitVelocityModel:
                        lr_start=0.1, lr_end=1.0, iterations=100, steps=10,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
-        self.optimized_parameters.append("h_log_raw")
         # IV. Optimize all parameters
         # Now that we should have a good starting point, we optimize all parameters
         # together. Starting with a small learning rate is probably unnecessary here, but
