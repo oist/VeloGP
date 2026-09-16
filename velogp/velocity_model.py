@@ -18,7 +18,7 @@ class VelocityModel(nn.Module):
     int32_min : int = -2**31
     int32_max : int = 2**31 - 1
 
-    H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-12
+    H_EIGENFUNCTION_VARIANCE_THRESHOLD : float = 1e-6
 
     @dataclass
     class Eigenbasis:
@@ -439,7 +439,7 @@ class VelocityModel(nn.Module):
         :return: A tensor containing the posterior standard deviation of v(t) at times `t`
         """
 
-        posterior_cov, pmap = loss.posterior_cov(["h_log_raw"])
+        posterior_cov, pmap = self.posterior_cov(loss, ["h_log_raw"])
         if "v0_log" in pmap:
             print("WARNING: Parameter v0_scaled should be excluded from the covariance " +
                   "matrix used with v_t_posterior_stderr(), otherwise the posterior std. " +
@@ -534,6 +534,39 @@ class VelocityModel(nn.Module):
             raise ValueError("invalid basis " + self.h_basis)
         return exp(self.h_log("canonical")[idx]) * sqrt(d[idx])
 
+    def posterior_cov_inv(self, loss,
+                          params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]] | None,
+                          ignore_priors=False) -> Tuple[Tensor, Dict[str, int]]:
+        # Get parameters
+        if params is None:
+            params = [*self.parameters()]
+        # Obtain jacobian for parameters
+        dM, pmap = loss.jacobian(params=params)
+        # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
+        u = einsum("ji,j,jk->ik", dM, loss.weights, dM).clone()
+        if not ignore_priors:
+            # Add Sigma_h^-1 for h_log_raw, which has a GP prior
+            # We do this by querying the parameter map to find the
+            # sub-matrix of u that corresponds to the parameter h_log_raw,
+            # and adding the inverse of its prior covariance matrix
+            if "h_log_raw" in pmap:
+                i, l = pmap["h_log_raw"], numel(self.h_log_raw)
+                u[i:(i+l), i:(i+l)] += self.h_cov_inv(include_sigma=True)
+            # Add prior for g_delta
+            # NOTE: This is only a very rough approximation since the prior
+            # on g_delta IS NOT Gaussian.
+            if "g_delta_scaled" in pmap:
+                i, l = pmap["g_delta_scaled"], numel(self.g_delta_scaled)
+                u[i:(i+l), i:(i+l)] += diagflat(dtensor([1.0]) / self.g_delta_prefactor ** 2)
+        return u, pmap
+
+    def posterior_cov(self, loss,
+                      params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]] | None,
+                      ignore_priors=False) -> Tuple[Tensor, Dict[str, int]]:
+        # Obtain inverse posterior cov matrix and invert
+        u, pmap = self.posterior_cov_inv(loss, params, ignore_priors)
+        return inverse(u), pmap
+        
     def H(self, t: Tensor) -> Tensor:
         """Evaluates H(t) = int_0^t h(u) du at the specified points t
 
@@ -1024,6 +1057,9 @@ class VelocityModel(nn.Module):
         else:
             raise RuntimeError("no prior defined for this parameter")
 
+    def prior_dist(self, parameter, hyperparameter_dependence):
+        pass
+
 class VelocityModelLoss(nn.Module):
     def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel, params: List[nn.Parameter]):
         super().__init__()
@@ -1060,41 +1096,6 @@ class VelocityModelLoss(nn.Module):
         for n, p in self.model.resolve_params(self.params, strict=False):
             l += self.model.prior(p, False).reshape(())
         return l
-
-    def posterior_cov_inv(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]] | None,
-                          ignore_priors=False) -> Tuple[Tensor, Dict[str, int]]:
-        # Get parameters
-        if params is None:
-            params = self.params
-        # Obtain jacobian for parameters
-        dM, pmap = self.jacobian(params=params)
-        # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
-        u = einsum("ji,j,jk->ik", dM, self.weights, dM).clone()
-        if not ignore_priors:
-            # Add Sigma_h^-1 for h_log_raw, which has a GP prior
-            # We do this by querying the parameter map to find the
-            # sub-matrix of u that corresponds to the parameter h_log_raw,
-            # and adding the inverse of its prior covariance matrix
-            if "h_log_raw" in pmap:
-                i, l = pmap["h_log_raw"], numel(self.model.h_log_raw)
-                u[i:(i+l), i:(i+l)] += self.model.h_cov_inv(include_sigma=True)
-            # Add prior for g_delta
-            # NOTE: This is only a very rough approximation since the prior
-            # on g_delta IS NOT Gaussian.
-            if "g_delta_scaled" in pmap:
-                i, l = pmap["g_delta_scaled"], numel(self.model.g_delta_scaled)
-                u[i:(i+l), i:(i+l)] += diagflat(dtensor([1.0]) / self.model.g_delta_prefactor ** 2)
-        return u, pmap
-
-    def posterior_cov(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]] | None,
-                      pmap: Dict[str, int] | None = None,
-                      ignore_priors=False) -> Tuple[Tensor, Dict[str, int]]:
-        # Obtain inverse posterior cov matrix
-        u, pmap = self.posterior_cov_inv(params=params, ignore_priors=ignore_priors)
-        # Invert
-        eb = VelocityModel.Eigenbasis.make(u)
-        uinv = einsum("ij,j,kj->ik", eb.eigenvectors, tensor([1.0]) / eb.eigenvalues, eb.eigenvectors)
-        return uinv, pmap
     
     def jacobian(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]] | None) -> [Tensor, Dict[str, int]]:
         # Get parameters
@@ -1129,7 +1130,6 @@ class VelocityModelLoss(nn.Module):
         # However, the updates this suggests for Theta do not seem to be reasonable,
         # it's unclear whether the problem is numerical or or principal issue.
         # Code left in for now because it may be useful in the future
-        params = self.model.resolve_params(params)
         # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i of the
         # jacobian, where n_i is the number of elements of the i-th parameter tensor
         c, pmap = self.model.flatmap(params)
