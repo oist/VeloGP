@@ -86,6 +86,10 @@ parser.add_argument("--growthrate", default=1.0, type=float, metavar="lambda",
                     help="growthrate of sequenced population [1/hour]")
 parser.add_argument("--origins", default={"oriC"}, metavar="origin,origin,...", action=SplitAndAdd,
                     help="names or locations of origins of replication")
+parser.add_argument("--v0-min", default=10, type=float,
+                    help="minimum baseline velocity")
+parser.add_argument("--v0-max", default=10000, type=float,
+                    help="maximal baseline velocity")
 parser.add_argument("--vt-timescale", type=float, default=0.2, metavar="value",
                     help="timescale of temporal velocity fluctuations in units of doubling time (covariance length scale)")
 parser.add_argument("--vt-magnitude", type=float, default=0.1, metavar="value",
@@ -304,7 +308,8 @@ MODEL = model.VelocityModel(
                          dtype=pt.float64),
     g_xranges_l=pt.tensor([f.begin for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.int32),
     g_xranges_u=pt.tensor([f.end for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.int32),
-    g_delayscale=pt.tensor([f.delayscale for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.float64)
+    g_delayscale=pt.tensor([f.delayscale for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.float64),
+    v0_min=model.dtensor(ARGS.v0_min), v0_max=model.dtensor(ARGS.v0_max)
 )
 MODEL.growthrate[0] = ARGS.growthrate / 3600
 MODEL.h_sigma[0] = ARGS.vt_magnitude
