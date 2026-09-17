@@ -1,15 +1,18 @@
 from typing import Any, Dict, Optional, Union, Tuple, List
 import operator
-import builtins
 from functools import reduce
-from velocity_model import VelocityModel, VelocityModelLoss, dtensor
-import sys
-import math
+
 import numpy as np
+
 import torch
-from torch import nn, optim
+from torch import nn, linalg, optim
 from torch import *
+
+import builtins
+import math
+import sys
 from builtins import float, int, range
+from .model import VelocityModel, VelocityModelLoss, dtensor
 
 class FitVelocityModel:
     def __init__(self, model: VelocityModel, loss: VelocityModelLoss):

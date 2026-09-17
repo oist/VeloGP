@@ -17,8 +17,8 @@ import pandas as pd
 import torch as pt
 import matplotlib.pyplot as pp
 
-import velocity_model
-import estimate_velocity
+from . import model
+from . import fit
 
 class ArgumentError(Exception):
     pass
@@ -296,7 +296,7 @@ ABUNDANCE = ABUNDANCE.loc[ABUNDANCE.valid > 0]
 
 # Create model
 DOUBLINGTIME = 3600 * math.log(2) / ARGS.growthrate
-MODEL = velocity_model.VelocityModel(
+MODEL = model.VelocityModel(
     genome_length=CHROMOSOME_LENGTHS[SINGLE_CHROMOSOME], is_circular=True,
     origins=pt.tensor([o.pos for o in ORIGINS if o.chr == SINGLE_CHROMOSOME], dtype=pt.int32),
     h_tgrid=pt.arange(start=0, end=DOUBLINGTIME * ARGS.vt_tmax,
@@ -311,14 +311,14 @@ MODEL.h_sigma[0] = ARGS.vt_magnitude
 MODEL.h_timescale[0] = DOUBLINGTIME * ARGS.vt_timescale
 
 # Create loss function
-LOSS = velocity_model.VelocityModelLoss(
+LOSS = model.VelocityModelLoss(
     x=pt.tensor(ABUNDANCE["x"].values, dtype=pt.float64),
     y_obs=pt.tensor(ABUNDANCE["y_obs"].values, dtype=pt.float64),
     s_obs=pt.tensor(ABUNDANCE["s_obs"].values, dtype=pt.float64),
     model=MODEL)
 
 # Create fit instance
-ALG = estimate_velocity.FitVelocityModel(MODEL, LOSS)
+ALG = fit.FitVelocityModel(MODEL, LOSS)
 
 # Print summary of settings
 print(f"*** SETTINGS")
