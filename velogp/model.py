@@ -292,7 +292,7 @@ class VelocityModel(nn.Module):
     def v0(self, value: Tensor) -> Tensor:
         """ Sets the current value of v0 """
         assert((value.dim() == 0))
-        self.v0_log[0] = log(value)
+        self.v0_log.copy_(log(value))
 
     @property
     def g_delta(self) -> Tensor:
