@@ -27,11 +27,11 @@ class FitVelocityModel:
             if log_params:
                 for n, p in self.model.named_parameters():
                     if builtins.any([ id(p) == id(pp) for pp in params ]):
-                        print(f"  {n}: {p.detach().numpy()}")
+                        print(f"      {n}: {p.detach().numpy()}")
                         if update_gradients:
-                            print(f"  grad {n}: {p.grad.detach().numpy()}")
+                            print(f"      grad {n}: {p.grad.detach().numpy()}")
             if log_loss:
-                    print(f"  loss: {l.item() * self.loss_prefactor.item():.3e} = {l.item():.3e} * {self.loss_prefactor.item():.3e}")
+                    print(f"      loss: {l.item() * self.loss_prefactor.item():.3e} = {l.item():.3e} * {self.loss_prefactor.item():.3e}")
             return l
         return s
 
@@ -85,7 +85,7 @@ class FitVelocityModel:
         # Update loss scale so that scaled loss is 1.0
         with no_grad():
             if log_steps:
-                print("Initially:")
+                print("  Initially:")
             l = lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps)
             self.loss_prefactor *= l
         i = 0
@@ -95,7 +95,7 @@ class FitVelocityModel:
             lr = lr_start + (lr_end - lr_start) * (i-1) / (steps - 1) if (steps is not None) and (steps > 1) else lr_end
             # Log step
             if log_steps:
-                print(f"Step {i}{f'/{steps}' if steps is not None else ''}, learning rate {lr}")
+                print(f"  LBFGS Step {i}{f'/{steps}' if steps is not None else ''}, learning rate {lr}")
             # Save parameter values
             fm = self.model.flatmap(params)
             p_before = self.model.pvector(params, fm)
@@ -119,12 +119,12 @@ class FitVelocityModel:
                 # otherwise and half the learning rate, then try again
                 lr = lr / 2
                 if log_steps:
-                    print(f"  Step {i}{f'/{steps}' if steps is not None else ''} failed, " +
+                    print(f"  LBFGS Step {i}{f'/{steps}' if steps is not None else ''} failed, " +
                           f"will make attempt {j+1} with learning rate reduced to {lr}")
             # Log number of interations done
             if log_steps:
-                print(f"  Iterations: {opt.state_dict()['state'][0]['n_iter']}")
-                print(f"  After step:")
+                print(f"    LBFGS iterations: {opt.state_dict()['state'][0]['n_iter']}")
+                print(f"    After step:")
             # Evaluate once more to see improvement
             l = lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps)
             gradients = self.model.pgradient(params, fm)
@@ -132,15 +132,15 @@ class FitVelocityModel:
                 self.loss_prefactor *= l
             # If number of steps is not fixed, stop once there's no improvement
             if log_steps:
-                print(f"  Final gradients: pos={sum(gradients > 0.0)}, neg={sum(gradients < 0)}, zero={sum(gradients == 0.0)}, " +
+                print(f"    Final gradients: pos={sum(gradients > 0.0)}, neg={sum(gradients < 0)}, zero={sum(gradients == 0.0)}, " +
                       f"max={max(gradients).item()}, min={min(gradients).item()}, " +
                       f"log-avg. magnitude={exp(mean(log(abs(gradients[gradients != 0.0])))).item()}")
             if steps is None and (1.0 - l <= tolerance):
                 if log_steps:
-                    print(f"  Relative improvement {1.0 - l.item()}  does not exceed tolerance {tolerance}, stopping")
+                    print(f"    Relative improvement {1.0 - l.item()}  does not exceed tolerance {tolerance}, stopping")
                 break
             elif log_steps:
-                print(f"  Relative improvement {1.0 - l.item()}")
+                print(f"    Relative improvement {1.0 - l.item()}")
         # Make sure the final values lie within the parameter's domains
         self.model.clamp_parameters()
         return opt
@@ -191,10 +191,12 @@ class FitVelocityModel:
             self.model.v0 = mean(origin_v)
 
     def run_stochastic(self, params: List[nn.Parameter], steps, perturb_start=1.0, perturb_end=0.01,
-                       log_steps=False, log_iterations=False, log_params=False):
+                       log_rounds=True, log_steps=False, log_iterations=False, log_params=False):
         for s in range(0, steps):
             # Compute perturbation strength for the current step
             perturb = perturb_start * (perturb_end / perturb_start) ** (s/(steps-1)) if steps > 1 else perturb_start
+            if log_rounds:
+                print(f"Round {s}: perturb={perturb}")
             # Evaluate loss & log
             loss_before = self.parameter_loss_function(params)(update_gradients=False) * self.loss_prefactor
             # Perturb parameters
@@ -212,15 +214,15 @@ class FitVelocityModel:
             loss = self.parameter_loss_function(params)(update_gradients=False) * self.loss_prefactor
             # Accept if the loss improved
             if loss > loss_before:
-                if log_steps:
-                    print(f"Step {s} (reject): loss={loss_before} -> {loss}, perturb={perturb}")
+                if log_rounds:
+                    print(f"Round {s} (reject): loss={loss_before} -> {loss}, perturb={perturb}")
                 with no_grad():
                     self.model.pvector_assign(params, pv_before)
-            elif log_steps:
-                 print(f"Step {s} (accept): loss={loss_before} -> {loss}, perturb={perturb}")
+            elif log_rounds:
+                 print(f"Round {s} (accept): loss={loss_before} -> {loss}, perturb={perturb}")
                 
 
-    def optimize_parameters_stochastic(self, steps: int, log_phases=False, log_steps=False, log_iterations=False, log_params=False):
+    def optimize_parameters_stochastic(self, steps: int, log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
         # I. Find origin delays
         if log_phases:
             print("Determining initial estimates for v0 and delay")
@@ -239,8 +241,7 @@ class FitVelocityModel:
         self.run_stochastic(steps=steps,
                             perturb_start=1.0, perturb_end=0.1,
                             params=[ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
-                            log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
-        
+                            log_rounds=log_rounds, log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
     
     def optimize_parameters(self, log_phases=False, log_steps=False, log_iterations=False, log_params=False):
         # I. Find origin delays
