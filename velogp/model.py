@@ -996,7 +996,7 @@ class VelocityModel(nn.Module):
         self.update_h_cov_eig()
         return self.h_cov_eig.eigenvalues
 
-    def prior_hlog(self, hyperparameter_dependence):
+    def prior_hlog(self, hyperparameter_dependence: bool):
         """The prior log-probability of self.h_log as a realization of a Gaussian process
 
         Returns the negative log of the probability (or, rather, density) of self.h_log as a sample
@@ -1028,7 +1028,7 @@ class VelocityModel(nn.Module):
             r += 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2)
             return r
 
-    def prior_gdelta(self, hyperparameter_dependence):
+    def prior_gdelta(self, hyperparameter_dependence: bool):
         """The prior log-probability of self.g_delta as a realization of independent Gaussians
 
         Returns the negative log-probability (or, rather, log-density) of self.g_delta as samples of independent
@@ -1065,7 +1065,7 @@ class VelocityModel(nn.Module):
         else:
             raise ValueError("Invalid basis " + basis)
 
-    def prior(self, parameter, hyperparameter_dependence):
+    def prior(self, parameter, hyperparameter_dependence: bool):
         if parameter is self.v0_log:
             return zeros([])
         elif parameter is self.h_log_raw:
