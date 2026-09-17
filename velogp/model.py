@@ -1032,13 +1032,14 @@ class VelocityModel(nn.Module):
         """The prior log-probability of self.g_delta as a realization of independent Gaussians
 
         Returns the negative log-probability (or, rather, log-density) of self.g_delta as samples of independent
-        Exponential distribution with mean self.g_delta_prefactor. Note that g_delta_scaled = g_delta / g_delta_prefactor
+        Exponential distribution with mean self.g_delta_prefactor. Since g_delta = g_delta_scaled * g_delta_prefactor, if
+        g_delta follows an exp. dist. with mean self.g_delta_prefactor, g_delta_scaled follows an exp. dist with mean 1.0.
 
         :param hdependent_only: Whether to return the full density, or only the g_delta-dependent terms
+
+        TODO: Is there really no hyperparameter-dependent term?
         """
-        r = sum(log(self.g_delta_prefactor)) if hyperparameter_dependence else 0
-        r += sum(abs(self.g_delta_scaled))
-        return r
+        return sum(abs(self.g_delta_scaled))
 
     def sample_hlog(self, basis : str, sample_shape : torch.Size = torch.Size([1])):
         """ Generates a random vector log(h(t_grid[0])), ..., log(h(t_grid[n]))
