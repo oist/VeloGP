@@ -27,12 +27,11 @@ class FitVelocityModel:
             if log_params:
                 for n, p in self.model.named_parameters():
                     if builtins.any([ id(p) == id(pp) for pp in params ]):
-                        print(f"{n}: {p.detach().numpy()}")
+                        print(f"  {n}: {p.detach().numpy()}")
                         if update_gradients:
-                            print(f"grad {n}: {p.grad.detach().numpy()}")
+                            print(f"  grad {n}: {p.grad.detach().numpy()}")
             if log_loss:
-                    print(f"loss_prefactor: {self.loss_prefactor.item()}")
-                    print(f"loss (scaled): {l.item()}")
+                    print(f"  loss: {l.item() * self.loss_prefactor.item():.3e} = {l.item():.3e} * {self.loss_prefactor.item():.3e}")
             return l
         return s
 
@@ -120,12 +119,12 @@ class FitVelocityModel:
                 # otherwise and half the learning rate, then try again
                 lr = lr / 2
                 if log_steps:
-                    print(f"Step {i}{f'/{steps}' if steps is not None else ''} failed, " +
+                    print(f"  Step {i}{f'/{steps}' if steps is not None else ''} failed, " +
                           f"will make attempt {j+1} with learning rate reduced to {lr}")
             # Log number of interations done
             if log_steps:
-                print(f"Iterations: {opt.state_dict()['state'][0]['n_iter']}")
-                print("After step:")
+                print(f"  Iterations: {opt.state_dict()['state'][0]['n_iter']}")
+                print(f"  After step:")
             # Evaluate once more to see improvement
             l = lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps)
             gradients = self.model.pgradient(params, fm)
@@ -133,15 +132,15 @@ class FitVelocityModel:
                 self.loss_prefactor *= l
             # If number of steps is not fixed, stop once there's no improvement
             if log_steps:
-                print(f"Final gradients: pos={sum(gradients > 0.0)}, neg={sum(gradients < 0)}, zero={sum(gradients == 0.0)}, " +
+                print(f"  Final gradients: pos={sum(gradients > 0.0)}, neg={sum(gradients < 0)}, zero={sum(gradients == 0.0)}, " +
                       f"max={max(gradients).item()}, min={min(gradients).item()}, " +
                       f"log-avg. magnitude={exp(mean(log(abs(gradients[gradients != 0.0])))).item()}")
             if steps is None and (1.0 - l <= tolerance):
                 if log_steps:
-                    print(f"Relative improvement {1.0 - l.item()}  does not exceed tolerance {tolerance}, stopping")
+                    print(f"  Relative improvement {1.0 - l.item()}  does not exceed tolerance {tolerance}, stopping")
                 break
             elif log_steps:
-                print(f"Relative improvement {1.0 - l.item()}")
+                print(f"  Relative improvement {1.0 - l.item()}")
         # Make sure the final values lie within the parameter's domains
         self.model.clamp_parameters()
         return opt
