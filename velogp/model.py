@@ -1041,7 +1041,7 @@ class VelocityModel(nn.Module):
         """
         return sum(abs(self.g_delta_scaled))
 
-    def sample_hlog(self, basis : str, sample_shape : torch.Size = torch.Size([1])):
+    def sample_hlog(self, basis : str, sample_shape : torch.Size | None = None):
         """ Generates a random vector log(h(t_grid[0])), ..., log(h(t_grid[n]))
 
         :param basis:basis to return the vector in
@@ -1053,8 +1053,8 @@ class VelocityModel(nn.Module):
         # Generate as many standard-normal random variables for each sample as the covariance matrix of h
         # has eigenvectors that are significantly larger than zero. This is a representation of a random
         # h in eigenbasis_scaled.
-        shape = (self.h_cov_eig.eigenvalues.size()[0],) + sample_shape
-        z = torch.distributions.normal.Normal(dtensor([0.0]), dtensor([1.0])).rsample(shape)
+        shape = (self.h_cov_eig.eigenvalues.size()[0],) + (sample_shape if sample_shape is not None else ())
+        z = torch.distributions.normal.Normal(dtensor(0.0), dtensor(1.0)).sample(shape)
         if (basis == "eigenbasis_scaled") or (basis == "col"):
             return z
         z_scaled = (self.h_sigma**2) * z * sqrt(self.h_eigenvalues())[:, (None,) * len(sample_shape)]
