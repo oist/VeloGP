@@ -250,7 +250,8 @@ class VelocityModel(nn.Module):
         assert(values.dim() == 1 and values.size(0) == c[-1])
         for (ci, (ni, pi)) in zip(c[:-1], params):
             ni = numel(pi)
-            pi[:] = values[ci:(ci + ni)]
+            v = values[ci:(ci + ni)]
+            pi.copy_(v.squeeze() if pi.shape + (1,) == v.shape else v)
 
     def pgradient(self, params: List[nn.Parameter], flatmap = None) -> Tensor:
         """

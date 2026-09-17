@@ -205,7 +205,7 @@ class FitVelocityModel:
             for n, p in self.model.resolve_params(self.loss.params):
                 with no_grad():
                     pp = self.model.sample_prior(p)
-                    p[:] = p*(1 - perturb) + pp*perturb
+                    p.copy_(p*(1 - perturb) + pp*perturb)
             # Optimize                    
             self.run_lbfgs(params, lr_start=0.1, lr_end=1.0, iterations=100, steps=1,
                            tolerance_change=-math.inf, line_search_fn="strong_wolfe",
