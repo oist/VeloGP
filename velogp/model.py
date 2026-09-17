@@ -411,7 +411,10 @@ class VelocityModel(nn.Module):
         # Remove first row which ri_right to the entry t=0 we added at the top
         return tab_state, tab_x, tab_dx, tab_v
 
-    def v_t_posterior_stderr(self, t: Tensor, loss) -> Tensor:
+    def v_t_posterior_stderr(self, t: Tensor,
+                             loss: VelocityModelLoss | None = None,
+                             posterior_cov: Tensor | None = None,
+                             pmap: dict[str, int] | None = None) -> Tensor:
         """
         The standard deviation of the posterior distribution of v(t)
 
@@ -434,15 +437,21 @@ class VelocityModel(nn.Module):
         the uncertainty about v0 * h(t).
 
         :param t: The times t at which to evaluate the standard deviation of v(t)
+        :param loss: The loss object
         :param posterior_cov: The posterior covariance matrix of the raw model parameters
         :param pmap: Parameter map for `posterior_cov` that maps parameter names to their
         starting indices in `posterior_cov`
         :return: A tensor containing the posterior standard deviation of v(t) at times `t`
         """
 
-        posterior_cov, pmap = self.posterior_cov(loss, ["h_log_raw"])
+        if posterior_cov is None and pmap is None and loss is not None:
+            posterior_cov, pmap = self.posterior_cov(loss, ["h_log_raw"])
+        elif posterior_cov is not None and pmap is not None and loss is None:
+            pass
+        else:
+            raise RuntimeError("Either posterior_cov and pmap, or loss must be specififed (but not both)")
         if "v0_log" in pmap:
-            print("WARNING: Parameter v0_scaled should be excluded from the covariance " +
+            print("WARNING: Parameter v0_log should be excluded from the covariance " +
                   "matrix used with v_t_posterior_stderr(), otherwise the posterior std. " +
                   "err. is inflated due to the anti-correlation of v0 and h(t).")
 
