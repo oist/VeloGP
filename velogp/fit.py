@@ -18,7 +18,7 @@ class FitVelocityModel:
     def __init__(self, model: VelocityModel, loss: VelocityModelLoss):
         self.model = model
         self.loss = loss
-        self.loss_prefactor = dtensor([1.0])
+        self.loss_prefactor = dtensor(1.0)
         self.loss_prefactor.requires_grad = False
 
     def parameter_loss_function(self, params: List[nn.Parameter], log_params_default=False, log_loss_default=False):
@@ -87,7 +87,7 @@ class FitVelocityModel:
             if log_steps:
                 print("Initially:")
             l = lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps)
-            self.loss_prefactor[0] *= l[0]
+            self.loss_prefactor *= l
         i = 0
         while (steps is None) or i < steps:
             i += 1
@@ -129,7 +129,7 @@ class FitVelocityModel:
             l = lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps)
             gradients = self.model.pgradient(params, fm)
             with no_grad():
-                self.loss_prefactor[0] *= l[0]
+                self.loss_prefactor *= l
             # If number of steps is not fixed, stop once there's no improvement
             if log_steps:
                 print(f"Final gradients: pos={sum(gradients > 0.0)}, neg={sum(gradients < 0)}, zero={sum(gradients == 0.0)}, " +
