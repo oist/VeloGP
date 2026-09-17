@@ -197,42 +197,49 @@ class FitVelocityModel:
             # Compute perturbation strength for the current step
             perturb = perturb_start * (perturb_end / perturb_start) ** (s/(steps-1)) if steps > 1 else perturb_start
             # Evaluate loss & log
-            loss_before = self.parameter_loss_function(params, update_gradients=False) * self.loss_prefactor
+            loss_before = self.parameter_loss_function(params)(update_gradients=False) * self.loss_prefactor
             # Perturb parameters
-            pv_before = self.model.pvector(params)
-            for p in self.model.params:
+            with no_grad():
+                pv_before = self.model.pvector(params)
+            for n, p in self.model.resolve_params(self.loss.params):
                 with no_grad():
-                    p[:] = p*(1 - perturb) + self.model.prior_dist(p).sample(p.size())*perturb
+                    pp = self.model.sample_prior(p)
+                    p[:] = p*(1 - perturb) + pp*perturb
             # Optimize                    
             self.run_lbfgs(params, lr_start=0.1, lr_end=1.0, iterations=100, steps=1,
                            tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                            log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
             # Evaluate loss again
-            loss = self.parameter_loss_function(params, update_gradients=False) * self.loss_prefactor
+            loss = self.parameter_loss_function(params)(update_gradients=False) * self.loss_prefactor
             # Accept if the loss improved
             if loss > loss_before:
                 if log_steps:
                     print(f"Step {s} (reject): loss={loss_before} -> {loss}, perturb={perturb}")
-                self.model.pvector_assign(pv_before)
+                with no_grad():
+                    self.model.pvector_assign(params, pv_before)
             elif log_steps:
                  print(f"Step {s} (accept): loss={loss_before} -> {loss}, perturb={perturb}")
                 
 
-    def optimize_parameters_stochastic(self, log_phases=False, log_steps=False, log_iterations=False, log_params=False):
+    def optimize_parameters_stochastic(self, steps: int, log_phases=False, log_steps=False, log_iterations=False, log_params=False):
         # I. Find origin delays
         if log_phases:
             print("Determining initial estimates for v0 and delay")
         self.initialize_v0_delays()
         # II. Stochastic optimization
-        self.h_switch_basis("eigenbasis_scaled")
+        self.model.h_switch_basis("eigenbasis_scaled")
         self.model.v0_log = nn.Parameter(self.model.v0_log)
         self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
-        self.model.h_log_raw.zero_()
+        with no_grad():
+            self.model.h_log_raw.zero_()
         self.model.g_delta_scaled = nn.Parameter(self.model.g_delta_scaled)
-        self.model.g_delta_scaled.zero_()
+        with no_grad():
+            self.model.g_delta_scaled.zero_()
         if log_phases:
             print("Stochastic optimization of v0, h(t) and g(x)")
-        self.run_stochastic([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
+        self.run_stochastic(steps=steps,
+                            perturb_start=1.0, perturb_end=0.1,
+                            params=[ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
                             log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         
     
