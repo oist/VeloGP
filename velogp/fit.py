@@ -28,7 +28,8 @@ class FitVelocityModel:
                 for n, p in self.model.named_parameters():
                     if builtins.any([ id(p) == id(pp) for pp in params ]):
                         print(f"{n}: {p.detach().numpy()}")
-                        print(f"grad {n}: {p.grad.detach().numpy()}")
+                        if update_gradients:
+                            print(f"grad {n}: {p.grad.detach().numpy()}")
             if log_loss:
                     print(f"loss_prefactor: {self.loss_prefactor.item()}")
                     print(f"loss (scaled): {l.item()}")
