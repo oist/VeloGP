@@ -349,7 +349,8 @@ print(f"  data points: {len(ABUNDANCE)} ({100.0*len(ABUNDANCE)/ABUNDANCE_ROWS_PR
 
 # Estimate parameters
 print("*** FITTING MODEL")
-ALG.optimize_parameters(log_phases=True, log_steps=ARGS.verbose)
+#ALG.optimize_parameters(log_phases=True, log_steps=ARGS.verbose)
+ALG.optimize_parameters_stochastic(steps=100, log_phases=True, log_rounds=True, log_steps=ARGS.verbose)
 
 # Compute posterior covariances of parameters
 print("*** COMPUTING POSTERIOR DISTRIBUTIONS")
