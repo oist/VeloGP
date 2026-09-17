@@ -212,7 +212,7 @@ class FitVelocityModel:
             if loss > loss_before:
                 if log_steps:
                     print(f"Step {s} (reject): loss={loss_before} -> {loss}, perturb={perturb}")
-                self.model.pvector_assign(pv)
+                self.model.pvector_assign(pv_before)
             elif log_steps:
                  print(f"Step {s} (accept): loss={loss_before} -> {loss}, perturb={perturb}")
                 
