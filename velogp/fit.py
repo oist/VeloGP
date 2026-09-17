@@ -242,6 +242,13 @@ class FitVelocityModel:
                             perturb_start=1.0, perturb_end=0.01,
                             params=[ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
                             log_rounds=log_rounds, log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
+        if log_phases:
+            print("Finalizing v0, g() and h() until the object cannot be further improved")
+        self.run_lbfgs([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
+                       lr_start=1.0, lr_end=1.0, iterations=100, steps=None, retry=30,
+                       tolerance=1e-6, line_search_fn="strong_wolfe",
+                       log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
+
     
     def optimize_parameters(self, log_phases=False, log_steps=False, log_iterations=False, log_params=False):
         # I. Find origin delays
