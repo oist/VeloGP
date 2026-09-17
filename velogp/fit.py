@@ -239,7 +239,7 @@ class FitVelocityModel:
         if log_phases:
             print("Stochastic optimization of v0, h(t) and g(x)")
         self.run_stochastic(steps=steps,
-                            perturb_start=1.0, perturb_end=0.1,
+                            perturb_start=1.0, perturb_end=0.01,
                             params=[ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
                             log_rounds=log_rounds, log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
     
