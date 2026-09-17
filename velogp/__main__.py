@@ -315,7 +315,8 @@ LOSS = model.VelocityModelLoss(
     x=pt.tensor(ABUNDANCE["x"].values, dtype=pt.float64),
     y_obs=pt.tensor(ABUNDANCE["y_obs"].values, dtype=pt.float64),
     s_obs=pt.tensor(ABUNDANCE["s_obs"].values, dtype=pt.float64),
-    model=MODEL)
+    model=MODEL,
+    params=["v0_log", "h_log_raw", "g_delta_scaled"])
 
 # Create fit instance
 ALG = fit.FitVelocityModel(MODEL, LOSS)
@@ -347,8 +348,8 @@ ALG.optimize_parameters(log_phases=True, log_steps=ARGS.verbose)
 
 # Compute posterior covariances of parameters
 print("*** COMPUTING POSTERIOR DISTRIBUTIONS")
-COV_V0, COV_V0_PMAP = ALG.parameter_posterior_cov(["v0_log"])
-COV_HG, COV_HG_PMAP = ALG.parameter_posterior_cov(["h_log_raw", "g_delta_scaled"])
+COV_V0, COV_V0_PMAP = MODEL.posterior_cov(LOSS, ["v0_log"])
+COV_HG, COV_HG_PMAP = MODEL.posterior_cov(LOSS, ["h_log_raw", "g_delta_scaled"])
 
 # Save results
 print("*** SAVING RESULTS")
@@ -526,7 +527,7 @@ if ARGS.plot_vt is not None:
 
             plot_t = MODEL.h_tgrid
             plot_vt = MODEL.v_t(MODEL.h_tgrid).detach()
-            plot_vt_stderr = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV_HG, COV_HG_PMAP).detach()
+            plot_vt_stderr = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
             plot_yrange = [0.8 * pt.min(plot_vt[plot_t <= t_fin]).item(), pt.max(plot_vt[plot_t <= t_fin]).item() * 1.2]
 
         pp.clf()
