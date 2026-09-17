@@ -53,7 +53,9 @@ class VelocityModel(nn.Module):
         origin_index_right: Tensor
 
     def __init__(self, genome_length: int, is_circular: bool, origins: IntTensor, h_tgrid: DoubleTensor,
-                 g_xranges_l: IntTensor, g_xranges_u: IntTensor, g_delayscale: DoubleTensor | None = None):
+                 g_xranges_l: IntTensor, g_xranges_u: IntTensor,
+                 v0_min: DoubleTensor, v0_max: DoubleTensor,
+                 g_delayscale: DoubleTensor | None = None):
         super().__init__()
         with no_grad():
             # Genome
@@ -62,7 +64,11 @@ class VelocityModel(nn.Module):
             # Growth rate
             self.growthrate = dtensor([1/3600], requires_grad=False)
             # Baseline velocity
-            self.v0_log = log(dtensor([500]))
+            self.v0_min = v0_min
+            self.v0_max = v0_max
+            self.v0_log_min = log(self.v0_min)
+            self.v0_log_max = log(self.v0_max)
+            self.v0_log = 0.5*self.v0_log_min + 0.5*self.v0_log_max
             # Gaussian process hyperparameters
             self.h_cov_function = "sqexp"
             self.h_timescale = tensor([1e2], requires_grad=False)
@@ -139,6 +145,7 @@ class VelocityModel(nn.Module):
         # function should be called *before* the model is evaluated.
         with no_grad():
             assert all(isfinite(self.v0_log))
+            self.v0_log.clamp_(self.v0_log_min, self.v0_log_max)
             assert all(isfinite(self.delay))
             self.delay.clamp_(0.0, math.inf)
             assert all(isfinite(self.g_delta_scaled))
@@ -419,7 +426,7 @@ class VelocityModel(nn.Module):
         The standard deviation of the posterior distribution of v(t)
 
         NOTE: the posterior covariance matrix posterior_cov should *not*
-        include the parameter v0_scaled. In our model, the only part of
+        include the parameter v0_log. In our model, the only part of
         the posterior likelihood that discriminates between two solutions
         v0, h(t) and v0', h' where v0 = a * v0' and h'(t) = a * h(t) is the
         prior on log h -- it will prefer the solution which reduces the overall
