@@ -1075,8 +1075,15 @@ class VelocityModel(nn.Module):
         else:
             raise RuntimeError("no prior defined for this parameter")
 
-    def prior_dist(self, parameter, hyperparameter_dependence):
-        pass
+    def sample_prior(self, parameter):
+        if parameter is self.v0_log:
+            return torch.distributions.uniform.Uniform(low=self.v0_log_min, high=self.v0_log_max).sample(parameter.shape)
+        elif parameter is self.h_log_raw:
+            return self.sample_hlog(self.h_basis)
+        elif parameter is self.g_delta_scaled:
+            return torch.distributions.exponential.Exponential(dtensor(1.0)).sample(parameter.shape)
+        else:
+            raise RuntimeError("no prior distribution defined for this parameter")
 
 class VelocityModelLoss(nn.Module):
     def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel, params: List[nn.Parameter]):
