@@ -237,13 +237,17 @@ class FitVelocityModel:
 
     def optimize_parameters_stochastic(self, steps: int, log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
         # I. Find origin delays
-        if log_phases:
-            print("Determining initial estimates for v0 and origin delays")
-        self.initialize_v0_delays()
-        if log_phases:
-            print(f"  v0: {self.model.v0:.0f} bp/s")
-            for i, n in enumerate(self.model.origin_names):
-                print(f"  {n}: {self.model.delay[i].item():.0f} s")
+        # This is unnecessary now that all parameters including delay are optimized
+        # during the stochastic optimization phase. It also doesn't do anything, since
+        # the first stochastic round runs with perturbation=1.0 and thus completely
+        # replaces the previous paramter values.
+        #if log_phases:
+        #    print("Determining initial estimates for v0 and origin delays")
+        #self.initialize_v0_delays()
+        #if log_phases:
+        #    print(f"  v0: {self.model.v0:.0f} bp/s")
+        #    for i, n in enumerate(self.model.origin_names):
+        #        print(f"  {n}: {self.model.delay[i].item():.0f} s")
 
         # II. Stochastic optimization
         self.model.h_switch_basis("eigenbasis_scaled")
