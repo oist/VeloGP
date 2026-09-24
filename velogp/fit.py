@@ -18,8 +18,7 @@ class FitVelocityModel:
     def __init__(self, model: VelocityModel, loss: VelocityModelLoss):
         self.model = model
         self.loss = loss
-        self.loss_prefactor = dtensor(1.0)
-        self.loss_prefactor.requires_grad = False
+        self.loss_prefactor = 1.0
 
     def parameter_loss_function(self, params: List[nn.Parameter], log_params_default=False, log_loss_default=False):
         def s(update_gradients=True, log_params=log_params_default, log_loss=log_loss_default):
@@ -31,14 +30,14 @@ class FitVelocityModel:
                         if update_gradients:
                             print(f"      grad {n}: {p.grad.detach().numpy()}")
             if log_loss:
-                    print(f"      loss: {l.item() * self.loss_prefactor.item():.3e} = {l.item():.3e} * {self.loss_prefactor.item():.3e}")
+                    print(f"      loss: {l.item() * self.loss_prefactor:.3e} = {l:.3e} * {self.loss_prefactor:.3e}")
             return l
         return s
 
     def evaluate_model_for_parameters(self, params: List[nn.Parameter], update_gradients=True):
         # If any parameter is nan, return nan
         if not reduce(operator.and_, [all(isfinite(p)) for p in params]):
-            return torch.tensor([math.nan])
+            return torch.tensor(math.nan)
         # Clamp parameters to their domain before each iteration
         self.model.clamp_parameters()
         # Evaluate loss and gradients
@@ -86,7 +85,7 @@ class FitVelocityModel:
         with no_grad():
             if log_steps:
                 print("  Initially:")
-            l = lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps)
+            l = lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps).item()
             self.loss_prefactor *= l
         i = 0
         while (steps is None) or i < steps:
