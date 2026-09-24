@@ -108,8 +108,8 @@ class VelocityModel(nn.Module):
             else:
                 self.origins_augmented = self.origins
                 self.origins_augmented.requires_grad = False
-            # Replication delayys
-            self.delay = zeros_like(self.origins, dtype=torch.double)
+            # Replication delays
+            self.delay_scaled = zeros_like(self.origins, dtype=torch.double)
             # Intervals on which g(x) differs from 1.0
             self.g_xranges_l = g_xranges_l
             self.g_xranges_u = g_xranges_u
@@ -150,8 +150,9 @@ class VelocityModel(nn.Module):
         with no_grad():
             assert all(isfinite(self.v0_log))
             self.v0_log.clamp_(self.v0_log_min, self.v0_log_max)
-            assert all(isfinite(self.delay))
-            self.delay.clamp_(0.0, math.inf)
+            assert all(isfinite(self.delay_scaled))
+            self.delay_scaled.clamp_(0.0, math.inf)
+            self.delay_scaled[:] -= min(self.delay_scaled)
             assert all(isfinite(self.g_delta_scaled))
             self.g_delta_scaled.clamp_(0.0, 10)
             assert all(isfinite(self.h_timescale))
@@ -298,6 +299,17 @@ class VelocityModel(nn.Module):
         """ Sets the current value of v0 """
         assert((value.dim() == 0))
         self.v0_log.copy_(log(value))
+
+    @property
+    def delay(self) -> Tensor:
+        """ The current value of the origin delays """
+        return self.delay_scaled / (10 * self.growthrate)
+
+    @delay.setter
+    def delay(self, value: Tensor):
+        """ Sets the current value of the origin delays """
+        assert(value.shape == self.delay_scaled.shape)
+        self.delay_scaled.copy_(value * 10.0 * self.growthrate)
 
     @property
     def g_delta(self) -> Tensor:
@@ -1073,6 +1085,8 @@ class VelocityModel(nn.Module):
     def prior(self, parameter, hyperparameter_dependence: bool):
         if parameter is self.v0_log:
             return zeros([])
+        elif parameter is self.delay_scaled:
+            return zeros([])
         elif parameter is self.h_log_raw:
             return self.prior_hlog(hyperparameter_dependence=hyperparameter_dependence)
         elif parameter is self.g_delta_scaled:
@@ -1083,6 +1097,8 @@ class VelocityModel(nn.Module):
     def sample_prior(self, parameter):
         if parameter is self.v0_log:
             return torch.distributions.uniform.Uniform(low=self.v0_log_min, high=self.v0_log_max).sample(parameter.shape)
+        elif parameter is self.delay_scaled:
+            return torch.distributions.exponential.Exponential(dtensor(1.0)).sample(parameter.shape)
         elif parameter is self.h_log_raw:
             return self.sample_hlog(self.h_basis)
         elif parameter is self.g_delta_scaled:
