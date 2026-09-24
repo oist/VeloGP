@@ -359,6 +359,7 @@ print(f"  v(x) delay scale: {ARGS.vx_delayscale}")
 print("Data:")
 print(f"  data points: {len(ABUNDANCE)} ({100.0*len(ABUNDANCE)/ABUNDANCE_ROWS_PREFILTER:.0f}% of {ABUNDANCE_ROWS_PREFILTER} points pre-filtering)")
 print(f"  mean value: {LOSS.y_obs_mean.item():.3f}")
+print(f"  mean weight: {pt.mean(LOSS.weights).item():.3f}")
 
 print("*** COMPILING MODELS")
 MODEL.compile()
