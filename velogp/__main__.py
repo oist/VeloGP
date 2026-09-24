@@ -332,7 +332,7 @@ LOSS = model.VelocityModelLoss(
     y_obs=pt.tensor(ABUNDANCE["y_obs"].values, dtype=pt.float64),
     s_obs=pt.tensor(ABUNDANCE["s_obs"].values, dtype=pt.float64),
     model=MODEL,
-    params=["v0_log", "h_log_raw", "g_delta_scaled"])
+    params=["v0_log", "delay_scaled", "h_log_raw", "g_delta_scaled"])
 
 # Create fit instance
 ALG = fit.FitVelocityModel(MODEL, LOSS)
@@ -357,6 +357,10 @@ print(f"  v(x) delay scale: {ARGS.vx_delayscale}")
 
 print("Data:")
 print(f"  data points: {len(ABUNDANCE)} ({100.0*len(ABUNDANCE)/ABUNDANCE_ROWS_PREFILTER:.0f}% of {ABUNDANCE_ROWS_PREFILTER} points pre-filtering)")
+
+print("*** COMPILING MODELS")
+MODEL.compile()
+LOSS.compile()
 
 # Estimate parameters
 print("*** FITTING MODEL")
