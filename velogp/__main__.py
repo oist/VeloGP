@@ -296,7 +296,7 @@ if not SINGLE_CHROMOSOME:
 ABUNDANCE = pd.read_csv(ARGS.inputfile, delimiter="\t")
 ABUNDANCE = ABUNDANCE.rename(columns={ fn: sn for sn, fn in COLUMNS.items() })
 ABUNDANCE_ROWS_PREFILTER = len(ABUNDANCE)
-ABUNDANCE = ABUNDANCE.loc[ABUNDANCE.valid > 0]
+ABUNDANCE = ABUNDANCE.loc[~pd.isna(ABUNDANCE.x) & ~pd.isna(ABUNDANCE.y_obs) & ~pd.isna(ABUNDANCE.s_obs) & (ABUNDANCE.valid > 0)]
 
 # Create model
 DOUBLINGTIME = 3600 * math.log(2) / ARGS.growthrate
