@@ -5,12 +5,18 @@ from dataclasses import dataclass
 import numpy as np
 
 import torch
+import torch._functorch.config
 from torch import nn, linalg
 from torch import *
+
 
 import builtins
 import math
 from builtins import float, int
+
+# Required so that retain_graph=True in jacobian() doesn't
+# error out for compiled models. Unclear why.
+torch._functorch.config.donated_buffer=False
 
 def dtensor(v, **kw_args) -> Tensor:
     """ Creates a 64-bit floating point tensor """
@@ -1164,6 +1170,8 @@ class VelocityModelLoss(nn.Module):
                 if p.grad is not None:
                     p.grad.zero_()
             # Evaluate model at position x_i and compute gradients
+            # TODO: It's unclear why retain_graph=True is necessary here
+            #       Getting rid of this would allow us to re-enable donated buffers
             y_pred = scale * self.model(self.x[k])
             y_pred.backward(inputs=[p for n, p in params], retain_graph=True)
             J[k, :] = self.model.pgradient(params, (c, pmap))
