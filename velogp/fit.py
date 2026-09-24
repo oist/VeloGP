@@ -71,6 +71,8 @@ class FitVelocityModel:
         r = np.linalg.lstsq(np.vstack([d, np.ones_like(d)]).T, log_a, rcond=None)[0]
         k = - r[0]
         log_a0 = r[1]
+        if math.isnan(k) or math.isnan(log_a0):
+            raise RuntimeError(f"local fit failed")
         if k <= 0:
             raise RuntimeError(f"no local maximum around origin at {origin}")
         return dtensor(k), dtensor(log_a0)
@@ -185,12 +187,21 @@ class FitVelocityModel:
         origin_v = dtensor([nan] * n)
         origin_loga0 = dtensor([nan] * n)
         for i in range(0, n):
-            k, log_a0 = self.local_fit(self.model.origins[i], 200000)
+            try:
+                k, log_a0 = self.local_fit(self.model.origins[i], 200000)
+            except Exception as e:
+                k = math.nan
+                log_a0 = 0.0
+                print(f"WARNING: local fit around origin {self.model.origin_names[i]} failed")
             origin_v[i] = self.model.growthrate / k
             origin_loga0[i] = log_a0
         with no_grad():
             self.model.delay[:] = (max(origin_loga0) - origin_loga0) / self.model.growthrate
-            self.model.v0 = mean(origin_v)
+            if not all(isnan(origin_v)):
+                self.model.v0 = mean(origin_v[~isnan(origin_v)])
+            else:
+                print(f"WARNING: no local fit produced a usable estimate of v0, initial guess set to genome length / doubling time")
+                self.model.v0 = (self.model.genome_length * self.model.growthrate) / math.log(2)
 
     def run_stochastic(self, params: List[nn.Parameter], steps, perturb_start=1.0, perturb_end=0.01,
                        log_rounds=True, log_steps=False, log_iterations=False, log_params=False):
