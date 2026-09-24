@@ -361,9 +361,9 @@ print(f"  data points: {len(ABUNDANCE)} ({100.0*len(ABUNDANCE)/ABUNDANCE_ROWS_PR
 print(f"  mean value: {LOSS.y_obs_mean.item():.3f}")
 print(f"  mean weight: {pt.mean(LOSS.weights).item():.3f}")
 
-print("*** COMPILING MODELS")
-MODEL.compile()
-LOSS.compile()
+#print("*** COMPILING MODELS")
+#MODEL.compile()
+#LOSS.compile()
 
 # Estimate parameters
 print("*** FITTING MODEL")
