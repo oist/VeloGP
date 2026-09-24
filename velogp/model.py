@@ -71,7 +71,7 @@ class VelocityModel(nn.Module):
             self.genome_length = tensor([genome_length], dtype=torch.int32, requires_grad=False)
             self.is_circular = is_circular
             # Growth rate
-            self.growthrate = dtensor([1/3600], requires_grad=False)
+            self.growthrate = dtensor([1.0/3600.0], requires_grad=False)
             # Baseline velocity
             self.v0_min = v0_min
             self.v0_max = v0_max
