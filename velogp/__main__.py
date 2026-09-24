@@ -439,7 +439,7 @@ if ARGS.out_vt is not None:
         tab = np.zeros(MODEL.h_tgrid.shape[0], dtype=cols)
         tab["t"] = MODEL.h_tgrid
         tab["vt"] = MODEL.v_t(MODEL.h_tgrid).detach()
-        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV_HG, COV_HG_PMAP).detach()
+        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
         # Write tab-separated to output file
         f = open_file(ARGS.out_vt, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
@@ -509,7 +509,7 @@ if ARGS.out_trajectories is not None:
         tab = np.zeros(MODEL.h_tgrid.shape[0], dtype=cols)
         tab["t"] = MODEL.h_tgrid
         tab["vt"] = MODEL.v_t(MODEL.h_tgrid).detach()
-        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, COV_HG, COV_HG_PMAP).detach()
+        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
         # Now fill in x(t), v_r(t)=v0*h(t) / g(x) and g(x) for all replisomes
         tab_state, tab_x, tab_dx, tab_v = MODEL.trajectories(MODEL.h_tgrid)
         for o_i, o in enumerate(ORIGINS):
