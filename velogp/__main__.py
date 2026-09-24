@@ -10,6 +10,7 @@ import argparse
 import pickle
 import gzip
 import bz2
+import random
 import BCBio.GFF
 import Bio.SeqIO
 import numpy as np
@@ -117,6 +118,10 @@ parser.add_argument('--verbose', default=False, action=argparse.BooleanOptionalA
                     help="output intermediate steps during parameter optimization")
 parser.add_argument("--cores", type=int,
                     help="number of cores to use (default: autodetect)")
+parser.add_argument("--seed", type=int,
+                    help="random seed for reproducibility")
+parser.add_argument("--rounds", type=int, default=100,
+                    help="number of optimization rounds")
 
 # Parse arguments
 ARGS = parser.parse_args()
@@ -136,6 +141,11 @@ COLUMNS = {
 # Set number of cores to user
 if ARGS.cores is not None:
     pt.set_num_threads(int(ARGS.cores))
+
+# Set random seet
+if ARGS.seed is not None:
+    pt.manual_seed(ARGS.seed)
+    random.seed(ARGS.seed)
 
 # Read genome to find chromosome names and lengths
 CHROMOSOME_LENGTHS : Dict[str, int] = {}
