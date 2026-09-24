@@ -86,6 +86,9 @@ class FitVelocityModel:
             if log_steps:
                 print("  Initially:")
             l = lossfn(update_gradients=False, log_loss=log_steps, log_params=log_params and log_steps).item()
+            if math.isnan(l):
+                raise RuntimeError("Unable to run LBFGS, initial loss is NaN")
+                return
             self.loss_prefactor *= l
         i = 0
         while (steps is None) or i < steps:
