@@ -474,9 +474,9 @@ class VelocityModel(nn.Module):
         :return: A tensor containing the posterior standard deviation of v(t) at times `t`
         """
 
-        if posterior_cov is None and pmap is None and loss is not None:
+        if (posterior_cov is None) and (pmap is None) and (loss is not None):
             posterior_cov, pmap = self.posterior_cov(loss, ["h_log_raw"])
-        elif posterior_cov is not None and pmap is not None and loss is None:
+        elif (posterior_cov is not None) and (pmap is not None) and (loss is None):
             pass
         else:
             raise RuntimeError("Either posterior_cov and pmap, or loss must be specififed (but not both)")
@@ -1150,7 +1150,7 @@ class VelocityModelLoss(nn.Module):
         return l
     
     def jacobian(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]] | None) -> [Tensor, Dict[str, int]]:
-        # Get parameters
+        # Get parameters
         if params is None:
             params = self.params
         # Resolve parameters
