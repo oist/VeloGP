@@ -1148,9 +1148,17 @@ class VelocityModelLoss(nn.Module):
         return scale * abd
 
     def forward(self) -> Tensor:
-        l = 0.5 * sum(self.weights * ((self.y_obs - self.y_pred()) ** 2))
+        yp = self.y_pred()
+        if any(isnan(yp)):
+            print(f"WARNING: model prediction is NaN for windows {','.join(map(str, nonzero(isnan(yp)).squeeze(1).tolist()))}")
+        l = 0.5 * sum(self.weights * ((self.y_obs - yp) ** 2))
+        if any(isnan(l)):
+            print("WARNING: log-likelihood is NaN")
         for n, p in self.model.resolve_params(self.params, strict=False):
-            l += self.model.prior(p, False).reshape(())
+            v = self.model.prior(p, False).reshape(())
+            if any(isnan(v)):
+                printf(f"WARNING: prior for parameter {n} is NaN")
+            l += v
         return l
     
     def jacobian(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]] | None) -> [Tensor, Dict[str, int]]:
