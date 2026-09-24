@@ -30,7 +30,7 @@ class FitVelocityModel:
                         if update_gradients:
                             print(f"      grad {n}: {p.grad.detach().numpy()}")
             if log_loss:
-                    print(f"      loss: {l.item() * self.loss_prefactor:.3e} = {l:.3e} * {self.loss_prefactor:.3e}")
+                    print(f"      loss: {l.item() * self.loss_prefactor:.0e} = {l:.3e} * {self.loss_prefactor:.0e}")
             return l
         return s
 
@@ -209,7 +209,7 @@ class FitVelocityModel:
             # Compute perturbation strength for the current step
             perturb = perturb_start * (perturb_end / perturb_start) ** (s/(steps-1)) if steps > 1 else perturb_start
             if log_rounds:
-                print(f"Round {s}: perturb={perturb}")
+                print(f"Round {s}: perturb={perturb:.4f}")
             # Evaluate loss & log
             loss_before = self.parameter_loss_function(params)(update_gradients=False) * self.loss_prefactor
             # Perturb parameters
@@ -228,11 +228,11 @@ class FitVelocityModel:
             # Accept if the loss improved
             if loss > loss_before:
                 if log_rounds:
-                    print(f"Round {s} (reject): loss={loss_before} -> {loss}, perturb={perturb}")
+                    print(f"Round {s} (reject): loss={loss_before:.1f} -> {loss:.1f}, perturb={perturb:0.4f}")
                 with no_grad():
                     self.model.pvector_assign(params, pv_before)
             elif log_rounds:
-                 print(f"Round {s} (accept): loss={loss_before} -> {loss}, perturb={perturb}")
+                 print(f"Round {s} (accept): loss={loss_before:.1f} -> {loss:.1f}, perturb={perturb:.04f}")
                 
 
     def optimize_parameters_stochastic(self, steps: int, log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
