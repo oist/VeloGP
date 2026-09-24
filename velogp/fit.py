@@ -196,7 +196,7 @@ class FitVelocityModel:
             origin_v[i] = self.model.growthrate / k
             origin_loga0[i] = log_a0
         with no_grad():
-            self.model.delay[:] = (max(origin_loga0) - origin_loga0) / self.model.growthrate
+            self.model.delay = (max(origin_loga0) - origin_loga0) / self.model.growthrate
             if not all(isnan(origin_v)):
                 self.model.v0 = mean(origin_v[~isnan(origin_v)])
             else:
@@ -215,7 +215,7 @@ class FitVelocityModel:
             # Perturb parameters
             with no_grad():
                 pv_before = self.model.pvector(params)
-            for n, p in self.model.resolve_params(self.loss.params):
+            for n, p in self.model.resolve_params(params):
                 with no_grad():
                     pp = self.model.sample_prior(p)
                     p.copy_(p*(1 - perturb) + pp*perturb)
@@ -238,10 +238,16 @@ class FitVelocityModel:
     def optimize_parameters_stochastic(self, steps: int, log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
         # I. Find origin delays
         if log_phases:
-            print("Determining initial estimates for v0 and delay")
+            print("Determining initial estimates for v0 and origin delays")
         self.initialize_v0_delays()
+        if log_phases:
+            print(f"  v0: {self.model.v0:.0f} bp/s")
+            for i, n in enumerate(self.model.origin_names):
+                print(f"  {n}: {self.model.delay[i].item():.0f} s")
+
         # II. Stochastic optimization
         self.model.h_switch_basis("eigenbasis_scaled")
+        self.model.delay_scaled = nn.Parameter(self.model.delay_scaled)
         self.model.v0_log = nn.Parameter(self.model.v0_log)
         self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
         with no_grad():
@@ -250,14 +256,14 @@ class FitVelocityModel:
         with no_grad():
             self.model.g_delta_scaled.zero_()
         if log_phases:
-            print("Stochastic optimization of v0, h(t) and g(x)")
+            print("Stochastic optimization of v0, delays, h(t) and g(x)")
         self.run_stochastic(steps=steps,
                             perturb_start=1.0, perturb_end=0.01,
-                            params=[ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
+                            params=[ self.model.v0_log, self.model.delay_scaled, self.model.g_delta_scaled, self.model.h_log_raw ],
                             log_rounds=log_rounds, log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         if log_phases:
             print("Finalizing v0, g() and h() until the object cannot be further improved")
-        self.run_lbfgs([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
+        self.run_lbfgs([ self.model.v0_log, self.model.delay_scaled, self.model.g_delta_scaled, self.model.h_log_raw ],
                        lr_start=1.0, lr_end=1.0, iterations=100, steps=None, retry=30,
                        tolerance=1e-6, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
