@@ -111,7 +111,7 @@ class FitVelocityModel:
                 # Create and run optimizer
                 opt = optim.LBFGS(params, lr=lr, max_iter=max_iter, max_eval=10 * iterations, **kwargs)
                 opt.step(lossfn)
-                # If the parameter are still finite, the step was successfull
+                # If the parameter are still finite, the step was successful
                 if all(isfinite(self.model.pvector(params, fm))) and all(isfinite(lossfn(update_gradients=False))):
                     break
                 # Otherwise, reset parameters
