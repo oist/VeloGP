@@ -53,7 +53,9 @@ class VelocityModel(nn.Module):
         origin_index_left: Tensor
         origin_index_right: Tensor
 
-    def __init__(self, genome_length: int, is_circular: bool, origins: IntTensor, h_tgrid: DoubleTensor,
+    def __init__(self, genome_length: int, is_circular: bool,
+                 origins: IntTensor, origin_names: list[str],
+                 h_tgrid: DoubleTensor,
                  g_xranges_l: IntTensor, g_xranges_u: IntTensor,
                  v0_min: DoubleTensor, v0_max: DoubleTensor,
                  g_delayscale: DoubleTensor | None = None):
@@ -93,6 +95,7 @@ class VelocityModel(nn.Module):
             self.h_cov_eig_timescale = None
             # Origins of replication
             self.origins = origins
+            self.origin_names = origin_names
             self.origins.requires_grad = False
             # Check that origins is a 1-d tensor with entries in ascending order
             assert (self.origins.dtype == torch.int32)
