@@ -313,6 +313,7 @@ DOUBLINGTIME = 3600 * math.log(2) / ARGS.growthrate
 MODEL = model.VelocityModel(
     genome_length=CHROMOSOME_LENGTHS[SINGLE_CHROMOSOME], is_circular=True,
     origins=pt.tensor([o.pos for o in ORIGINS if o.chr == SINGLE_CHROMOSOME], dtype=pt.int32),
+    origin_names=[o.name for o in ORIGINS if o.chr == SINGLE_CHROMOSOME],
     h_tgrid=pt.arange(start=0, end=DOUBLINGTIME * ARGS.vt_tmax,
                          step=DOUBLINGTIME * ARGS.vt_timescale / ARGS.vt_resolution,
                          dtype=pt.float64),
