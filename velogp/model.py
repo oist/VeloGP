@@ -1186,7 +1186,7 @@ class VelocityModelLoss(nn.Module):
         #   tilde-Sigma_h dM^T Sigma_y^-1 (y - m) - tilde-Pi_h Theta
         # to vanish when Theta is a MAP estimate of the parameters.
         # However, the updates this suggests for Theta do not seem to be reasonable,
-        # it's unclear whether the problem is numerical or or principal issue.
+        # it's unclear whether the problem is numerical or principal issue.
         # Code left in for now because it may be useful in the future
         # The i-th parameter tensor corresponds to columns c_i,...,c_i + n_i of the
         # jacobian, where n_i is the number of elements of the i-th parameter tensor
