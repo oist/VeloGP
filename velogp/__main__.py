@@ -142,11 +142,6 @@ COLUMNS = {
 if ARGS.cores is not None:
     pt.set_num_threads(int(ARGS.cores))
 
-# Set random seet
-if ARGS.seed is not None:
-    pt.manual_seed(ARGS.seed)
-    random.seed(ARGS.seed)
-
 # Read genome to find chromosome names and lengths
 CHROMOSOME_LENGTHS : Dict[str, int] = {}
 fasta_file = open_file(ARGS.genome, "rt")
@@ -308,6 +303,11 @@ ABUNDANCE = ABUNDANCE.rename(columns={ fn: sn for sn, fn in COLUMNS.items() })
 ABUNDANCE_ROWS_PREFILTER = len(ABUNDANCE)
 ABUNDANCE = ABUNDANCE.loc[~pd.isna(ABUNDANCE.x) & ~pd.isna(ABUNDANCE.y_obs) & ~pd.isna(ABUNDANCE.s_obs) & (ABUNDANCE.valid > 0)]
 
+# Set random seet
+if ARGS.seed is not None:
+    pt.manual_seed(ARGS.seed)
+    random.seed(ARGS.seed)
+
 # Create model
 DOUBLINGTIME = 3600 * math.log(2) / ARGS.growthrate
 MODEL = model.VelocityModel(
@@ -339,6 +339,7 @@ ALG = fit.FitVelocityModel(MODEL, LOSS)
 
 # Print summary of settings
 print(f"*** SETTINGS")
+print(f"Random seed: {ARGS.seed}")
 print(f"Number of cores: {pt.get_num_threads()}")
 print(f"Genome configuration:")
 for chr, l in CHROMOSOME_LENGTHS.items():
