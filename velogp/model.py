@@ -1123,8 +1123,12 @@ class VelocityModelLoss(nn.Module):
         assert self.x.dim() == 1
         self.y_obs = y_obs
         self.y_obs.requires_grad = False
+        if any(isnan(self.y_obs)):
+            raise RuntimeError("y_obs contains NaNs")
         self.s_obs = s_obs
         self.s_obs.requires_grad = False
+        if any(isnan(self.s_obs)):
+            raise RuntimeError("s_obs contains NaNs")
         assert self.y_obs.dim() in [1, 2]
         assert self.y_obs.size()[0] == self.x.size()[0]
         assert self.s_obs.size() == self.y_obs.size()
