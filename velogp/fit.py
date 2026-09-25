@@ -205,10 +205,13 @@ class FitVelocityModel:
 
     def run_stochastic(self, params: List[nn.Parameter], steps, perturb_start=1.0, perturb_end=0.01,
                        log_rounds=True, log_steps=False, log_iterations=False, log_params=False):
-        for s in range(0, steps):
-            # Compute perturbation strength for the current step
-            perturb = perturb_start * (perturb_end / perturb_start) ** (s/(steps-1)) if steps > 1 else perturb_start
-            if log_rounds:
+        perturb = perturb_start
+        s = 0
+        perturb_factor = (perturb_end / perturb_start) ** (1.0 / steps)
+        while perturb >= perturb_end:
+            # Increaes step counter
+            s += 1
+            if log_steps or log_iterations or log_params:
                 print(f"Round {s}: perturb={perturb:.4f}")
             # Evaluate loss & log
             loss_before = self.parameter_loss_function(params)(update_gradients=False) * self.loss_prefactor
@@ -227,12 +230,17 @@ class FitVelocityModel:
             loss = self.parameter_loss_function(params)(update_gradients=False) * self.loss_prefactor
             # Accept if the loss improved
             if loss > loss_before:
+                # Reject, reduce perturbation strength
                 if log_rounds:
-                    print(f"Round {s} (reject): loss={loss_before:.1f} -> {loss:.1f}, perturb={perturb:0.4f}")
+                    print(f"Round {s} (reject): loss={loss_before:.1f} -/-> {loss:.1f}, perturb={perturb:0.4f} ---> {perturb * perturb_factor:0.4f}")
+                # Restore parameters
                 with no_grad():
                     self.model.pvector_assign(params, pv_before)
+                # Reduce perturbation strength
+                perturb *= perturb_factor
             elif log_rounds:
-                 print(f"Round {s} (accept): loss={loss_before:.1f} -> {loss:.1f}, perturb={perturb:.04f}")
+                # Accept, keep same perturbation strength
+                print(f"Round {s} (accept): loss={loss_before:.1f} ---> {loss:.1f}, perturb={perturb:.04f}")
                 
 
     def optimize_parameters_stochastic(self, steps: int, log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
