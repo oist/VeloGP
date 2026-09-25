@@ -79,7 +79,7 @@ class VelocityModel(nn.Module):
             self.v0_log_max = log(self.v0_max)
             self.v0_log = 0.5*self.v0_log_min + 0.5*self.v0_log_max
             # Gaussian process hyperparameters
-            self.h_cov_function = "sqexp"
+            self.h_cov_function = "se"
             self.h_timescale = tensor([1e2], requires_grad=False)
             self.h_sigma = tensor([1.0], requires_grad=False)
             # Grid on which h(t) is defined as a piece-wise constant (right-continuous) function
@@ -882,14 +882,18 @@ class VelocityModel(nn.Module):
     def h_cov_reduced_canonical(self) -> Tensor:
         """Returns Sigma / h_sigma^2, where Sigma is the covariance matrix of h_log for canonical coordinates"""
         d = abs(self.h_tgrid[None, :] - self.h_tgrid[:, None]) / self.h_timescale
-        if self.h_cov_function == "sqexp":            
+        if self.h_cov_function == "se":            
+            # Squared-exp
             return exp(- (d ** 2) / 2)
-        elif self.h_cov_function == "matern1/2":
+        elif self.h_cov_function == "m0":
+            # Matern-1/2
             return exp(-d)
-        elif self.h_cov_function == "matern3/2":
+        elif self.h_cov_function == "m1":
+            # Matern-3/2
             dp = math.sqrt(3) * d
             return (1 + dp) * exp(-dp)
-        elif self.h_cov_function == "matern5/2":
+        elif self.h_cov_function == "m2":
+            # Matern-5/2
             dp = math.sqrt(5) * d 
             return (1 + dp + (5/3) * (d**2)) * exp(-dp)
         else:

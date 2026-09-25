@@ -91,8 +91,8 @@ parser.add_argument("--v0-min", default=10, type=float,
                     help="minimum baseline velocity")
 parser.add_argument("--v0-max", default=10000, type=float,
                     help="maximal baseline velocity")
-parser.add_argument("--vt-covariance", choices=["sqexp", "matern1/2", "matern3/2", "matern5/2"], default="matern3/2",
-                    help="velocity covariance, maternK/2 is K-1 times continuously differentiable, sqexp infinitly often"),
+parser.add_argument("--vt-covariance", choices=["se", "m0", "m1", "m2"], default="m1",
+                    help="velocity covariance, determines smoothness degree d of v(t). For mK (=matern-K+1/2) d=K, for se (=squared-exp.) d=inf"),
 parser.add_argument("--vt-timescale", type=float, default=0.2, metavar="value",
                     help="timescale of temporal velocity fluctuations in units of doubling time (covariance length scale)")
 parser.add_argument("--vt-magnitude", type=float, default=0.1, metavar="value",
@@ -357,7 +357,7 @@ for chr, l in CHROMOSOME_LENGTHS.items():
 print(f"Parameters:")
 print(f"  growth rate: {ARGS.growthrate} [1/h]")
 print(f"  v(t) covariance: {ARGS.vt_covariance} "
-      f"(makes v(t) { {'sqexp': math.inf, 'matern1/2': 0, 'matern3/2': 1, 'matern5/2': 2}[ARGS.vt_covariance] } times continuously differentiable)")
+      f"(makes v(t) { {'se': math.inf, 'm0': 0, 'm1': 1, 'm2': 2}[ARGS.vt_covariance] } times continuously differentiable)")
 print(f"  v(t) timescale: {MODEL.h_timescale[0]:.0f} [s] (= {ARGS.vt_timescale} doublingtimes)")
 print(f"  log v(t) std. err: {ARGS.vt_magnitude}")
 print(f"  v(x) delay scale: {ARGS.vx_delayscale}")
