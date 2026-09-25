@@ -91,6 +91,8 @@ parser.add_argument("--v0-min", default=10, type=float,
                     help="minimum baseline velocity")
 parser.add_argument("--v0-max", default=10000, type=float,
                     help="maximal baseline velocity")
+parser.add_argument("--vt-covariance", choices=["sqexp", "matern1/2", "matern3/2", "matern5/2"], default="matern3/2",
+                    help="velocity covariance, maternK/2 is K-1 times continuously differentiable, sqexp infinitly often"),
 parser.add_argument("--vt-timescale", type=float, default=0.2, metavar="value",
                     help="timescale of temporal velocity fluctuations in units of doubling time (covariance length scale)")
 parser.add_argument("--vt-magnitude", type=float, default=0.1, metavar="value",
@@ -323,6 +325,7 @@ MODEL = model.VelocityModel(
     v0_min=model.dtensor(ARGS.v0_min), v0_max=model.dtensor(ARGS.v0_max)
 )
 MODEL.growthrate[0] = ARGS.growthrate / 3600
+MODEL.h_cov_function = ARGS.vt_covariance
 MODEL.h_sigma[0] = ARGS.vt_magnitude
 MODEL.h_timescale[0] = DOUBLINGTIME * ARGS.vt_timescale
 
@@ -341,6 +344,7 @@ ALG = fit.FitVelocityModel(MODEL, LOSS)
 print(f"*** SETTINGS")
 print(f"Random seed: {ARGS.seed}")
 print(f"Number of cores: {pt.get_num_threads()}")
+print(f"Optimization rounds: {ARGS.rounds}")
 print(f"Genome configuration:")
 for chr, l in CHROMOSOME_LENGTHS.items():
     print(f"  chromosome {chr}: {l}bp")
@@ -352,6 +356,8 @@ for chr, l in CHROMOSOME_LENGTHS.items():
 
 print(f"Parameters:")
 print(f"  growth rate: {ARGS.growthrate} [1/h]")
+print(f"  v(t) covariance: {ARGS.vt_covariance} "
+      f"(makes v(t) { {'sqexp': math.inf, 'matern1/2': 0, 'matern3/2': 1, 'matern5/2': 2}[ARGS.vt_covariance] } times continuously differentiable)")
 print(f"  v(t) timescale: {MODEL.h_timescale[0]:.0f} [s] (= {ARGS.vt_timescale} doublingtimes)")
 print(f"  log v(t) std. err: {ARGS.vt_magnitude}")
 print(f"  v(x) delay scale: {ARGS.vx_delayscale}")
