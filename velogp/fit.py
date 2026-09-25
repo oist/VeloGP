@@ -222,12 +222,17 @@ class FitVelocityModel:
                 with no_grad():
                     pp = self.model.sample_prior(p)
                     p.copy_(p*(1 - perturb) + pp*perturb)
-            # Optimize                    
-            self.run_lbfgs(params, lr_start=0.1, lr_end=1.0, iterations=100, steps=10,
-                           tolerance_change=-math.inf, line_search_fn="strong_wolfe",
-                           log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
-            # Evaluate loss again
-            loss = self.parameter_loss_function(params)(update_gradients=False) * self.loss_prefactor
+            # Optimize
+            try:
+                self.run_lbfgs(params, lr_start=0.1, lr_end=1.0, iterations=100, steps=10,
+                               tolerance_change=-math.inf, line_search_fn="strong_wolfe",
+                               log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
+                # Evaluate loss again
+                loss = self.parameter_loss_function(params)(update_gradients=False) * self.loss_prefactor
+            except Exception as e:
+                # In case of an error set the loss to infinity so that we reject below
+                loss = math.inf
+                print(f"WARNING: LBFGS failed with error: {e}")
             # Accept if the loss improved
             if loss > loss_before:
                 # Reject, reduce perturbation strength
