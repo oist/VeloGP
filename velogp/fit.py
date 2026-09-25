@@ -21,6 +21,7 @@ class FitVelocityModel:
         self.loss_prefactor = 1.0
 
     def parameter_loss_function(self, params: List[nn.Parameter], log_params_default=False, log_loss_default=False):
+        """ Returns a function that evaluates the model and optionally logs parameters, loss and gradients """
         def s(update_gradients=True, log_params=log_params_default, log_loss=log_loss_default):
             l = self.evaluate_model_for_parameters(params, update_gradients=update_gradients)
             if log_params:
@@ -35,6 +36,7 @@ class FitVelocityModel:
         return s
 
     def evaluate_model_for_parameters(self, params: List[nn.Parameter], update_gradients=True):
+        """" Evaluate model and optionally gradients """
         # If any parameter is nan, return nan
         if not reduce(operator.and_, [all(isfinite(p)) for p in params]):
             return torch.tensor(math.nan)
@@ -60,6 +62,7 @@ class FitVelocityModel:
         return l
 
     def local_fit(self, origin : Tensor, neighbourhood : int):
+        """ Fit local constant-velocity model at each origin to estimate v0 and origin delays. Currently unused. """
         # We use that A(d) = A(o) * exp(- k * |d|) where k = lambda/v, o is
         # the origin and d is the distance from the origin. It follows that
         # log A(d) = log A(o) - k * |d|, i.e. we can estimate A(o) and k using
@@ -151,6 +154,7 @@ class FitVelocityModel:
 
     def run_sgd(self, params: List[nn.Parameter], lr_start=0.001, lr_end=0.001, iterations=1000,
                 log_steps=False, log_iterations=False, log_params=False, **kwargs):
+        """ Run SGD optimizer. Currently unused """
         lossfn = self.parameter_loss_function(params, log_loss_default=log_iterations,
                                               log_params_default=log_params and log_iterations)
         for i in range(iterations):
@@ -160,6 +164,7 @@ class FitVelocityModel:
 
     def run_adam(self, params: List[nn.Parameter], lr_start=0.001, lr_end=0.001, iterations=1000,
                  log_iterations=False, log_params=False, **kwargs):
+        """ Run ADAM optimizer. Currently unused """
         lossfn = self.parameter_loss_function(params, log_loss_default=log_iterations,
                                               log_params_default=log_params and log_iterations)
         for i in range(iterations):
@@ -168,6 +173,7 @@ class FitVelocityModel:
             opt.step()
     
     def run_newton(self, lr: float=0.1, iterations: int=10):
+        """ Do Newton step. Currently unused, possibly incorrect """
 #        basis = self.model.h_basis
 #        self.model.h_switch_basis("canonical")
         p = [self.model.h_log_raw]
@@ -179,6 +185,7 @@ class FitVelocityModel:
 #        self.model.h_switch_basis(basis)
 
     def initialize_v0_delays(self):
+        """ Estimate v0 and origin delays by fitting local models at each origin. Currently unused """
         # Fit A(d) = A(o) * exp(- k * |d|) where k = lambda/v locally. Then
         # use the global relationship A(o) = A_max * exp(- lambda * delta_o)
         # between the abundances A(o) at different. origins o and the firing
@@ -205,6 +212,7 @@ class FitVelocityModel:
 
     def run_stochastic(self, params: List[nn.Parameter], steps, perturb_start=1.0, perturb_end=0.01,
                        log_rounds=True, log_steps=False, log_iterations=False, log_params=False):
+        """ Run gradient-informed stochastic search """
         perturb = perturb_start
         s = 0
         perturb_factor = (perturb_end / perturb_start) ** (1.0 / steps)
@@ -249,20 +257,7 @@ class FitVelocityModel:
                 
 
     def optimize_parameters_stochastic(self, steps: int, log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
-        # I. Find origin delays
-        # This is unnecessary now that all parameters including delay are optimized
-        # during the stochastic optimization phase. It also doesn't do anything, since
-        # the first stochastic round runs with perturbation=1.0 and thus completely
-        # replaces the previous paramter values.
-        #if log_phases:
-        #    print("Determining initial estimates for v0 and origin delays")
-        #self.initialize_v0_delays()
-        #if log_phases:
-        #    print(f"  v0: {self.model.v0:.0f} bp/s")
-        #    for i, n in enumerate(self.model.origin_names):
-        #        print(f"  {n}: {self.model.delay[i].item():.0f} s")
-
-        # II. Stochastic optimization
+        """ Optimize all parameters using gradient-informed stochastic searching """
         self.model.h_switch_basis("eigenbasis_scaled")
         self.model.delay_scaled = nn.Parameter(self.model.delay_scaled)
         self.model.v0_log = nn.Parameter(self.model.v0_log)
@@ -287,10 +282,15 @@ class FitVelocityModel:
 
     
     def optimize_parameters(self, log_phases=False, log_steps=False, log_iterations=False, log_params=False):
+        """ Optimize all parameters using gradient descent. Deprecated, use optimize_parameters_stochastic() instead """
         # I. Find origin delays
         if log_phases:
             print("Determining initial estimates for v0 and delay")
         self.initialize_v0_delays()
+        if log_phases:
+            print(f"  v0: {self.model.v0:.0f} bp/s")
+            for i, n in enumerate(self.model.origin_names):
+                print(f"  {n}: {self.model.delay[i].item():.0f} s")
         # II. Optimize g()
         # We first optimize v0 and the spatial delays since these are easier to fit.
         # We start with a small learning rate because L-BGFS is otherwise prone to making
