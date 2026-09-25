@@ -1102,13 +1102,13 @@ class VelocityModel(nn.Module):
 
     def sample_prior(self, parameter):
         if parameter is self.v0_log:
-            return torch.distributions.uniform.Uniform(low=self.v0_log_min, high=self.v0_log_max).sample(parameter.shape)
+            return torch.distributions.uniform.Uniform(low=self.v0_log_min, high=self.v0_log_max).sample(parameter.shape).squeeze()
         elif parameter is self.delay_scaled:
-            return torch.distributions.exponential.Exponential(dtensor(1.0)).sample(parameter.shape)
+            return torch.distributions.exponential.Exponential(dtensor(1.0)).sample(parameter.shape).squeeze()
         elif parameter is self.h_log_raw:
             return self.sample_hlog(self.h_basis)
         elif parameter is self.g_delta_scaled:
-            return torch.distributions.exponential.Exponential(dtensor(1.0)).sample(parameter.shape)
+            return torch.distributions.exponential.Exponential(dtensor(1.0)).sample(parameter.shape).squeeze()
         else:
             raise RuntimeError("no prior distribution defined for this parameter")
 
