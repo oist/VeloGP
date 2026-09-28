@@ -390,7 +390,7 @@ COV_HG, COV_HG_PMAP = MODEL.posterior_cov(LOSS, ["h_log_raw", "g_delta_scaled"])
 print("*** SAVING RESULTS")
 
 # Save fitted model
-if ARGS.out_model is not None:
+if (ARGS.out_model is not None) and (ARGS.out_model != ""):
     print(f"Saving fitted model to {ARGS.out_model}")
     try:
         pt.save(MODEL, ARGS.out_model)
@@ -398,7 +398,7 @@ if ARGS.out_model is not None:
         print(f"ERROR: Failed to save {ARGS.out_model}: {e}")
 
 # Save all results
-if ARGS.out_objects is not None:
+if (ARGS.out_objects is not None) and (ARGS.out_objects != ""):
     print(f"Saving fitting algorithm, loss function, fitted model and posterior covariances to {ARGS.out_objects}")
     f = None
     try:
@@ -414,7 +414,7 @@ if ARGS.out_objects is not None:
             f.close()
 
 # Save y_obs and y_pred
-if ARGS.out_abundance is not None:
+if (ARGS.out_abundance is not None) and (ARGS.out_abundance != ""):
     print(f"Saving observed and predicted abundances to {ARGS.out_abundance}")
     f = None
     try:
@@ -443,7 +443,7 @@ if ARGS.out_abundance is not None:
             f.close()
 
 # Save v(t)
-if ARGS.out_vt is not None:
+if (ARGS.out_vt is not None) and (ARGS.out_vt != ""):
     print(f"Saving v(t) to {ARGS.out_vt}")
     f = None
     try:
@@ -465,7 +465,7 @@ if ARGS.out_vt is not None:
             f.close()
 
 # Save v(x), i.e. delays incurred at various genomic features
-if ARGS.out_vx_feature_delays is not None:
+if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != ""):
     print(f"Saving v(x) to {ARGS.out_vx_feature_delays}")
     f = None
     try:
@@ -501,7 +501,7 @@ if ARGS.out_vx_feature_delays is not None:
         if f is not None:
             f.close()
 
-if ARGS.out_trajectories is not None:
+if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
     print(f"Saving velocity profile and replisome trajectories x(t) to {ARGS.out_trajectories}")
     f = None
     try:
@@ -552,7 +552,7 @@ if ARGS.out_stats is not None:
     raise ArgumentError("Saving stats is not yet implemented")
 
 # Plot v(t)
-if ARGS.plot_vt is not None:
+if (ARGS.plot_vt is not None) and (ARGS.plot_vt != ""):
     try:
         print(f"Plotting v(t) to {ARGS.plot_vt}")
         with pt.no_grad():
@@ -583,7 +583,7 @@ if ARGS.plot_vt is not None:
         pass
 
 # Plot abundance data and fitted model
-if ARGS.plot_abundance is not None:
+if (ARGS.plot_abundance is not None) and (ARGS.plot_abundance != ""):
     try:
         print(f"Plotting data and fitted model to {ARGS.plot_abundance}")
         pp.clf()
