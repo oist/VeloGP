@@ -1161,7 +1161,7 @@ class VelocityModelLoss(nn.Module):
         for n, p in self.model.resolve_params(self.params, strict=False):
             v = self.model.prior(p, False).reshape(())
             if any(isnan(v)):
-                printf(f"WARNING: prior for parameter {n} is NaN")
+                print(f"WARNING: prior for parameter {n} is NaN")
             l += v
         return l
     
