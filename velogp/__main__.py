@@ -508,7 +508,7 @@ if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
         k = sum([1 for o in ORIGINS if o.chr == SINGLE_CHROMOSOME])
         # Construct column list and format tuple
         cols = [('t', np.float64), ('v0', np.float64), ('vt', np.float64), ('vt_stderr', np.float64) ]
-        fmt = ('%.5f', '%.5f', '%.5f')
+        fmt = ('%.5f', '%.5f', '%.5f', '%.5f')
         cols += [ (f"{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
         fmt += ('%d',) * (2*k)
         cols += [ (f"x.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
