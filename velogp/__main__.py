@@ -122,9 +122,11 @@ parser.add_argument("--cores", type=int,
                     help="number of cores to use (default: autodetect)")
 parser.add_argument("--seed", type=int,
                     help="random seed for reproducibility")
-parser.add_argument("--halve", type=int, default=20,
-                    help="number of rejects required to halve perturbation strength")
-parser.add_argument("--perturbation-min", type=float, default=0.01,
+parser.add_argument("--perturbation-rejects", type=int, default=5,
+                    help="number of rejects required to reduce perturbation strength")
+parser.add_argument("--perturbation-reduction", type=float, default=0.5**(1.0/4),
+                    help="factor by which perturbation strength is reduced")
+parser.add_argument("--perturbation-min", type=float, default=0.001,
                     help="perturbation strength after which to stop")
 
 
@@ -347,7 +349,7 @@ ALG = fit.FitVelocityModel(MODEL, LOSS)
 print(f"*** SETTINGS")
 print(f"Random seed: {ARGS.seed}")
 print(f"Number of cores: {pt.get_num_threads()}")
-print(f"Halve: after {ARGS.halve} rejects")
+print(f"Perturbation: reduce by {ARGS.perturbation_reduction:.5f} after {ARGS.perturbation_rejects} rejects")
 print(f"Genome configuration:")
 for chr, l in CHROMOSOME_LENGTHS.items():
     print(f"  chromosome {chr}: {l}bp")
@@ -377,7 +379,9 @@ print(f"  mean weight: {pt.mean(LOSS.weights).item():.3f}")
 # Estimate parameters
 print("*** FITTING MODEL")
 #ALG.optimize_parameters(log_phases=True, log_steps=ARGS.verbose)
-ALG.optimize_parameters_stochastic(halve=ARGS.halve, perturb_end=ARGS.perturbation_min,
+ALG.optimize_parameters_stochastic(perturb_reduce=ARGS.perturbation_reduction,
+                                   perturb_rejects=ARGS.perturbation_rejects,
+                                   perturb_end=ARGS.perturbation_min,
                                    log_phases=True, log_rounds=True,
                                    log_steps=ARGS.verbose, log_params=ARGS.verbose)
 

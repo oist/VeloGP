@@ -210,7 +210,8 @@ class FitVelocityModel:
                 print(f"WARNING: no local fit produced a usable estimate of v0, initial guess set to genome length / doubling time")
                 self.model.v0 = (self.model.genome_length * self.model.growthrate) / math.log(2)
 
-    def run_stochastic(self, params: List[nn.Parameter], perturb_start=1.0, perturb_end=0.01, halve=20,
+    def run_stochastic(self, params: List[nn.Parameter],
+                       perturb_rejects=10, perturb_reduce=0.5, perturb_start=1.0, perturb_end=0.01,
                        log_rounds=True, log_steps=False, log_iterations=False, log_params=False):
         """ Run gradient-informed stochastic search """
         perturb = perturb_start
@@ -220,10 +221,10 @@ class FitVelocityModel:
             # Increaes step counter
             s += 1
             # Halve perturvation strength after specified number of rejects, stop when below perturb_min
-            if rejects >= halve:
-                perturb /= 2.0
+            if rejects >= perturb_rejects:
                 if log_rounds:
-                    print(f"Round {s}: halving to perturb={perturb} after {rejects} rejects")
+                    print(f"Round {s}: perturb={perturb:.4f} ---> {perturb*perturb_reduce:.4f} after {rejects} rejects")
+                perturb *= perturb_reduce
                 rejects = 0
             if perturb < perturb_end:
                 break
@@ -264,7 +265,8 @@ class FitVelocityModel:
                 print(f"Round {s} (accept): loss={loss_before:.1f} ---> {loss:.1f}, perturb={perturb:.04f}, rejects={rejects:0}")
 
 
-    def optimize_parameters_stochastic(self, halve: int, perturb_end: float = 0.01, log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
+    def optimize_parameters_stochastic(self, perturb_rejects: int = 10, perturb_reduce: float = 0.5, perturb_end: float = 0.01,
+                                       log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
         """ Optimize all parameters using gradient-informed stochastic searching """
         self.model.h_switch_basis("eigenbasis_scaled")
         self.model.delay_scaled = nn.Parameter(self.model.delay_scaled)
@@ -277,7 +279,7 @@ class FitVelocityModel:
             self.model.g_delta_scaled.zero_()
         if log_phases:
             print("Stochastic optimization of v0, delays, h(t) and g(x)")
-        self.run_stochastic(halve=halve, perturb_start=1.0, perturb_end=perturb_end,
+        self.run_stochastic(perturb_rejects=perturb_rejects, perturb_reduce=perturb_reduce, perturb_start=1.0, perturb_end=perturb_end,
                             params=[ self.model.v0_log, self.model.delay_scaled, self.model.g_delta_scaled, self.model.h_log_raw ],
                             log_rounds=log_rounds, log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         if log_phases:
