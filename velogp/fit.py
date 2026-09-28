@@ -216,14 +216,17 @@ class FitVelocityModel:
         perturb = perturb_start
         s = 0
         rejects = 0
-        while perturb >= perturb_end:
+        while True:
             # Increaes step counter
             s += 1
+            # Halve perturvation strength after specified number of rejects, stop when below perturb_min
             if rejects >= halve:
                 perturb /= 2.0
                 if log_rounds:
                     print(f"Round {s}: halving to perturb={perturb} after {rejects} rejects")
                 rejects = 0
+            if perturb < perturb_end:
+                break
             if log_steps or log_iterations or log_params:
                 print(f"Round {s}: perturb={perturb:.4f}")
             # Evaluate loss & log
