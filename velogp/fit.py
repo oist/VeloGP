@@ -223,7 +223,7 @@ class FitVelocityModel:
                 perturb /= 2.0
                 rejects = 0
                 if log_rounds:
-                    print(f"Round{s}: halving to perturb={perturb} after {rejects} rejects")
+                    print(f"Round {s}: halving to perturb={perturb} after {rejects} rejects")
             if log_steps or log_iterations or log_params:
                 print(f"Round {s}: perturb={perturb:.4f}")
             # Evaluate loss & log
