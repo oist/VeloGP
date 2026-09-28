@@ -210,15 +210,20 @@ class FitVelocityModel:
                 print(f"WARNING: no local fit produced a usable estimate of v0, initial guess set to genome length / doubling time")
                 self.model.v0 = (self.model.genome_length * self.model.growthrate) / math.log(2)
 
-    def run_stochastic(self, params: List[nn.Parameter], steps, perturb_start=1.0, perturb_end=0.01,
+    def run_stochastic(self, params: List[nn.Parameter], perturb_start=1.0, perturb_end=0.01, halve=20,
                        log_rounds=True, log_steps=False, log_iterations=False, log_params=False):
         """ Run gradient-informed stochastic search """
         perturb = perturb_start
         s = 0
-        perturb_factor = (perturb_end / perturb_start) ** (1.0 / steps)
+        rejects = 0
         while perturb >= perturb_end:
             # Increaes step counter
             s += 1
+            if rejects >= halve:
+                perturb /= 2.0
+                rejects = 0
+                if log_rounds:
+                    print(f"Round{s}: halving to perturb={perturb} after {rejects} rejects")
             if log_steps or log_iterations or log_params:
                 print(f"Round {s}: perturb={perturb:.4f}")
             # Evaluate loss & log
@@ -244,19 +249,19 @@ class FitVelocityModel:
             # Accept if the loss improved
             if loss > loss_before:
                 # Reject, reduce perturbation strength
+                rejects += 1
                 if log_rounds:
-                    print(f"Round {s} (reject): loss={loss_before:.1f} -/-> {loss:.1f}, perturb={perturb:0.4f} ---> {perturb * perturb_factor:0.4f}")
+                    print(f"Round {s} (reject): loss={loss_before:.1f} -/-> {loss:.1f}, perturb={perturb:0.4f}, rejects={rejects:0}")
                 # Restore parameters
                 with no_grad():
                     self.model.pvector_assign(params, pv_before)
-                # Reduce perturbation strength
-                perturb *= perturb_factor
             elif log_rounds:
                 # Accept, keep same perturbation strength
-                print(f"Round {s} (accept): loss={loss_before:.1f} ---> {loss:.1f}, perturb={perturb:.04f}")
-                
+                rejects = 0
+                print(f"Round {s} (accept): loss={loss_before:.1f} ---> {loss:.1f}, perturb={perturb:.04f}, rejects={rejects:0}")
 
-    def optimize_parameters_stochastic(self, steps: int, log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
+
+    def optimize_parameters_stochastic(self, halve: int, perturb_end: float = 0.01, log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
         """ Optimize all parameters using gradient-informed stochastic searching """
         self.model.h_switch_basis("eigenbasis_scaled")
         self.model.delay_scaled = nn.Parameter(self.model.delay_scaled)
@@ -269,8 +274,7 @@ class FitVelocityModel:
             self.model.g_delta_scaled.zero_()
         if log_phases:
             print("Stochastic optimization of v0, delays, h(t) and g(x)")
-        self.run_stochastic(steps=steps,
-                            perturb_start=1.0, perturb_end=0.01,
+        self.run_stochastic(halve=halve, perturb_start=1.0, perturb_end=perturb_end,
                             params=[ self.model.v0_log, self.model.delay_scaled, self.model.g_delta_scaled, self.model.h_log_raw ],
                             log_rounds=log_rounds, log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         if log_phases:

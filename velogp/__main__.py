@@ -122,8 +122,11 @@ parser.add_argument("--cores", type=int,
                     help="number of cores to use (default: autodetect)")
 parser.add_argument("--seed", type=int,
                     help="random seed for reproducibility")
-parser.add_argument("--rounds", type=int, default=100,
-                    help="number of optimization rounds")
+parser.add_argument("--halve", type=int, default=20,
+                    help="number of rejects required to halve perturbation strength")
+parser.add_argument("--perturbation-min", type=float, default=0.01,
+                    help="perturbation strength after which to stop")
+
 
 # Parse arguments
 ARGS = parser.parse_args()
@@ -344,7 +347,7 @@ ALG = fit.FitVelocityModel(MODEL, LOSS)
 print(f"*** SETTINGS")
 print(f"Random seed: {ARGS.seed}")
 print(f"Number of cores: {pt.get_num_threads()}")
-print(f"Optimization rounds: {ARGS.rounds}")
+print(f"Halve: after {ARGS.halve} rejects")
 print(f"Genome configuration:")
 for chr, l in CHROMOSOME_LENGTHS.items():
     print(f"  chromosome {chr}: {l}bp")
@@ -374,7 +377,8 @@ print(f"  mean weight: {pt.mean(LOSS.weights).item():.3f}")
 # Estimate parameters
 print("*** FITTING MODEL")
 #ALG.optimize_parameters(log_phases=True, log_steps=ARGS.verbose)
-ALG.optimize_parameters_stochastic(steps=ARGS.rounds, log_phases=True, log_rounds=True,
+ALG.optimize_parameters_stochastic(halve=ARGS.halve, perturb_end=ARGS.perturbation_min,
+                                   log_phases=True, log_rounds=True,
                                    log_steps=ARGS.verbose, log_params=ARGS.verbose)
 
 # Compute posterior covariances of parameters
