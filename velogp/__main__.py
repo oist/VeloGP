@@ -507,7 +507,7 @@ if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
     try:
         k = sum([1 for o in ORIGINS if o.chr == SINGLE_CHROMOSOME])
         # Construct column list and format tuple
-        cols = [('t', np.float64), ('vt', np.float64), ('vt_stderr', np.float64) ]
+        cols = [('t', np.float64), ('v0', np.float64), ('vt', np.float64), ('vt_stderr', np.float64) ]
         fmt = ('%.5f', '%.5f', '%.5f')
         cols += [ (f"{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
         fmt += ('%d',) * (2*k)
@@ -521,8 +521,9 @@ if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
         fmt += ('%.5f',) * (2*k)
         # Fill columns, v(t)=v0*h(t) first
         tab = np.zeros(MODEL.h_tgrid.shape[0], dtype=cols)
-        tab["t"] = MODEL.h_tgrid
-        tab["vt"] = MODEL.v_t(MODEL.h_tgrid).detach()
+        tab["t"] = MODEL.h_tgrid.detach().numpy()
+        tab["v0"] = MODEL.v0.detach().numpt()
+        tab["vt"] = MODEL.v_t(MODEL.h_tgrid).detach().numpy()
         tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
         # Now fill in x(t), v_r(t)=v0*h(t) / g(x) and g(x) for all replisomes
         tab_state, tab_x, tab_dx, tab_v = MODEL.trajectories(MODEL.h_tgrid)
