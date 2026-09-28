@@ -522,7 +522,7 @@ if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
         # Fill columns, v(t)=v0*h(t) first
         tab = np.zeros(MODEL.h_tgrid.shape[0], dtype=cols)
         tab["t"] = MODEL.h_tgrid.detach().numpy()
-        tab["v0"] = MODEL.v0.detach().numpt()
+        tab["v0"] = MODEL.v0.detach().numpy()
         tab["vt"] = MODEL.v_t(MODEL.h_tgrid).detach().numpy()
         tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
         # Now fill in x(t), v_r(t)=v0*h(t) / g(x) and g(x) for all replisomes
