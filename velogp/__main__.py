@@ -198,14 +198,14 @@ for gff_filename in ARGS.gff:
         for record in BCBio.GFF.parse(gff_file):
             # NOTE: The top-level objects are SeqRecord, which represents a sequence.
             # This of course has nothing to do with how a GFF file actually looks,
-            # this is just more API sillyness. But anyway, we propagate that sequence
+            # this is just more API silliness. But anyway, we propagate that sequence
             # name down when we expand features and sub-features, since there seems to
             # be no way to get to it later otherwise...
             stack.extend([ (record.id, sf) for sf in record.features ])
             while len(stack) > 0:
                 # Get next feature, push sub-features on stack to handle later
                 # NOTE: The stack contains (seq, feature) pairs since we have to propagate
-                # the sequence name downwards due to API sillyness, see above...
+                # the sequence name downwards due to API silliness, see above...
                 seq, f = stack.pop()
                 stack.extend([ (seq, sf) for sf in f.sub_features ])
                 # Generate list of "names" of the feature. Oh, GFF...
