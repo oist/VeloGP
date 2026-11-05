@@ -11,6 +11,7 @@ import pickle
 import gzip
 import bz2
 import random
+import copy
 import BCBio.GFF
 import Bio.SeqIO
 import numpy as np
@@ -182,6 +183,7 @@ for origin in ARGS.origins:
 ORIGINS_NAMES_TO_BE_RESOLVED : Set[str] = ORIGINS_NAMES.copy()
 
 # Genomic features at which replisomes might slow down
+VX_FEATURES_TENTATIVE : List[Feature] = list()
 VX_FEATURES : List[Feature] = list()
 VX_FEATURE_NAMES_TO_BE_RESOLVED : Set[str] = set(ARGS.vx_feature_names)
 
@@ -228,7 +230,7 @@ for gff_filename in ARGS.gff:
                     elif feature.begin == feature.end:
                         feature.end += 1
                     # Add to feature list
-                    VX_FEATURES.append(feature)
+                    VX_FEATURES_TENTATIVE.append(feature)
                     # Removed from to-be-resolved list
                     for fn in f_matching_feature_names:
                         VX_FEATURE_NAMES_TO_BE_RESOLVED.remove(fn)
@@ -267,7 +269,7 @@ for bed_filename in ARGS.bed:
             elif feature.begin == feature.end:
                 feature.end += 1
             # Add to feature list
-            VX_FEATURES.append(feature)
+            VX_FEATURES_TENTATIVE.append(feature)
             # Removed from to-be-resolved list
             VX_FEATURE_NAMES_TO_BE_RESOLVED.remove(feature.name)
         # Resolve unresolved origin names:
@@ -285,15 +287,21 @@ if len(ORIGINS_NAMES_TO_BE_RESOLVED) > 0:
     raise ArgumentError(f"unable to resolve origin names {', '.join(ORIGINS_NAMES_TO_BE_RESOLVED)}")
 
 # Sort features and origins
-VX_FEATURES.sort(key=lambda f: (f.chr, f.begin))
+VX_FEATURES_TENTATIVE.sort(key=lambda f: (f.chr, f.begin))
 ORIGINS.sort(key=lambda o: (o.chr, o.pos))
 
-# Check that features do not overlap
-f_prev : Feature = None
-for f in VX_FEATURES:
+# Merge overlapping features
+f_prev : Feature | None = None
+for f in VX_FEATURES_TENTATIVE:
     if f_prev is not None and f_prev.chr == f.chr and f_prev.end > f.begin:
-        raise ArgumentError(f"features {f_prev.name} and {f.name} overlap " +
-                            f"({f_prev.chr}:{f_prev.begin+1}-{f_prev.end-1} and {f.chr}:{f.begin+1}-{f.end-1})")
+        # If f overlaps f_prev, extend f_prev and append name
+        print(f"Merging vx feature {f.name} into previous feture {f_prev.name} due to overlap")
+        f_prev.end = max(f_prev.end, f.end)
+        f_prev.name = f"{f_prev.name},{f.name}"
+    else:
+        # Otherwise, add new feature
+        f_prev = copy.copy(f)
+        VX_FEATURES.append(f_prev)
 
 # Check that every chromosome has an origin
 for chr in CHROMOSOME_LENGTHS.keys():
