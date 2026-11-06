@@ -780,8 +780,9 @@ class VelocityModel(nn.Module):
         :return: Virtual replication times as a tensor of the same shape
         """
         x_prep = x if isinstance(x, VelocityModel.X) else self.prepare_input(x)
-        t_left = self.delay[x_prep.origin_index_left] + self.G(x_prep.x, self.origins[x_prep.origin_index_left], dtensor([+1.0])) / self.v0
-        t_right = self.delay[x_prep.origin_index_right] + self.G(x_prep.x, self.origins[x_prep.origin_index_right], dtensor([-1.0])) / self.v0
+        delay_p = self.H(self.delay)
+        t_left = delay_p[x_prep.origin_index_left] + self.G(x_prep.x, self.origins[x_prep.origin_index_left], dtensor([+1.0])) / self.v0
+        t_right = delay_p[x_prep.origin_index_right] + self.G(x_prep.x, self.origins[x_prep.origin_index_right], dtensor([-1.0])) / self.v0
         return minimum(t_left, t_right)
 
     def P(self, x: Tensor | X) -> Tensor:
