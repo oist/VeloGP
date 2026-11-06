@@ -399,41 +399,60 @@ class VelocityModel(nn.Module):
                     break
                 ri_left = ri_left % k
                 oi_left = oi_left % numel(self.origins)
-            # Get left and right origins and compute time at which the replisomes meet
-            o_left = self.origins[oi_left] if oi_left >= 0 else dtensor([0.0])
-            d_left = self.delay[oi_left] if oi_left >= 0 else dtensor([0.0])
-            o_right = self.origins[oi_right] if oi_right < numel(self.origins) else self.genome_length
-            d_right = self.delay[oi_right] if oi_right< numel(self.origins) else dtensor([0.0])
-            # Before replisome creation, state = 0, position = origin, distance = 0.0, v = nan
-            if ri_left >= 0:
-                w = t < d_left
+            # On linear chromosomes, the chromosome ends delimit the first and last segment. There is
+            # no replisome coming from the chromosome end, the replisome simply stops once it reaches it.
+            has_left = oi_left >= 0
+            has_right = oi_right < numel(self.origins)
+            # Get left and right origins (or chromosome ends) and the delays of the origins
+            o_left = self.origins[oi_left] if has_left else dtensor([0.0])
+            d_left = self.delay[oi_left] if has_left else None
+            o_right = self.origins[oi_right] if has_right else self.genome_length
+            d_right = self.delay[oi_right] if has_right else None
+            # Virtual time a single replisome needs to traverse the whole segment between the origins
+            # NOTE: Must be careful on a circular genome with a single origin since G(x, x) == 0
+            # TODO: This has to be adapted if G(x,o,d) ever becomes direction-dependent.
+            fudge = tensor(1 if self.is_circular and (o_left == o_right).item() else 0, dtype=torch.int32)
+            u_segment = self.G(o_right - fudge, o_left, d=dtensor([1.0])) / self.v0
+            # Virtual firing times of the origins
+            u_left = self.H(d_left) if has_left else None
+            u_right = self.H(d_right) if has_right else None
+            # If one replisome reaches the opposite origin before that origin fires, the replisome
+            # of the opposite origin never starts and the first replisome stops at the opposite
+            # origin. This mirrors T(), which only considers the two origins surrounding a location.
+            left_fires = has_left and (not has_right or (u_left - u_right < u_segment).item())
+            right_fires = has_right and (not has_left or (u_right - u_left < u_segment).item())
+            # Compute time at which the segment is fully replicated
+            # TODO: We ignore diffusion here atm
+            if left_fires and right_fires:
+                t_meet = self.Hinv((u_segment + u_left + u_right) / 2.0)
+            elif left_fires:
+                t_meet = self.Hinv(u_left + u_segment)
+            else:
+                t_meet = self.Hinv(u_right + u_segment)
+            # Before replisome creation (or forever, if it is never created),
+            # state = 0, position = origin, distance = 0.0, v = nan
+            if has_left:
+                w = (t < d_left) if left_fires else ones_like(t, dtype=torch.bool)
                 tab_state[w, ri_left] = 0
-                tab_x[w, ri_left] = o_left
+                tab_x[w, ri_left] = o_left.double()
                 tab_dx[w, ri_left] = 0.0
                 tab_v[w, ri_left] = nan
-            if ri_right >= 0:
-                w = t < d_right
+            if has_right:
+                w = (t < d_right) if right_fires else ones_like(t, dtype=torch.bool)
                 tab_state[w, ri_right] = 0
-                tab_x[w, ri_right] = o_right
+                tab_x[w, ri_right] = o_right.double()
                 tab_dx[w, ri_right] = 0.0
                 tab_v[w, ri_right] = nan
-            # Compute meeting time.
-            # NOTE: Must be careful on a circular genome with a single origin since G(x, x) == 0
-            fudge = tensor(1 if self.is_circular and (o_left == o_right).item() else 0, dtype=torch.int32)
-            # TODO: We ignore diffusion here atm
-            # TODO: This has to be adapted if G(x,o,d) ever becomes direction-dependent.
-            t_meet = self.Hinv((self.G(o_right - fudge, o_left, d=dtensor([1.0]))/self.v0 + self.H(d_left) + self.H(d_right))/2.0)
-            x_meet_left, dx_meet_left, _ = self.replisome_position(t_meet, origin=o_left, dir=dtensor([+1.0]), delay=d_left)
-            x_meet_right, dx_meet_right, _ = self.replisome_position(t_meet, origin=o_right, dir=dtensor([-1.0]), delay=d_right)
-            # After replisomes meet, state = 2, position = meeting point, distance = dist. travelled, v = nan
-            if ri_left >= 0:
-                w = t > t_meet
+            # After the segment is replicated, state = 2, position = meeting point, distance = dist. travelled, v = nan
+            w = t > t_meet
+            if left_fires:
+                x_meet_left, dx_meet_left, _ = self.replisome_position(t_meet, origin=o_left, dir=dtensor([+1.0]), delay=d_left)
                 tab_state[w, ri_left] = 2
                 tab_x[w, ri_left] = x_meet_left
                 tab_dx[w, ri_left] = dx_meet_left
                 tab_v[w, ri_left] = nan
-            if ri_right >= 0:
-                w = t > t_meet
+            if right_fires:
+                x_meet_right, dx_meet_right, _ = self.replisome_position(t_meet, origin=o_right, dir=dtensor([-1.0]), delay=d_right)
                 tab_state[w, ri_right] = 2
                 tab_x[w, ri_right] = x_meet_right
                 tab_dx[w, ri_right] = dx_meet_right
@@ -700,6 +719,9 @@ class VelocityModel(nn.Module):
         with no_grad():
             lt = z[None, ...] < G[(...,) + (None,) * z.dim()]
             idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
+            # z = G_0(L) (i.e. the chromosome end) lies in the extra cell added above, map it to the last
+            # real grid cell. This happens for replisomes that reached the end of a linear chromosome.
+            idx = clamp(idx, max=numel(self.g_xgrid) - 1)
         # Within [z_i, z_(i+1)] the function G is linear, i.e.
         #   G(t) = G(z_i) + (z - z_i) * g[i]
         # and its inverse is thus
