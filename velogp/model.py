@@ -775,17 +775,23 @@ class VelocityModel(nn.Module):
     def T(self, x: Tensor | X) -> Tensor:
         """Returns the virtual replication time T(x)
 
-        T(x) = min { Delta_l + int_(o_l)^x g(u)/v0 du, Delta_r + int_x^(o_r) g(u)/v0 du }, which is the virtual time
-        at which the location x, surrounded by origins o_l on the left and o_r on the right is replicated. Delta_l,
-        Delta_r are the delays with which these origins fire.
+        T(x) = min { H(Delta_l) + int_(o_l)^x g(u)/v0 du, H(Delta_r) + int_x^(o_r) g(u)/v0 du }, which is the virtual
+        time at which the location x, surrounded by origins o_l on the left and o_r on the right is replicated.
+        Delta_l, Delta_r are the (physical) delays with which these origins fire, see Eq. (S1.6). On linear
+        chromosomes, locations left of the first or right of the last origin have only one surrounding origin.
 
         :param x: Genomic locations as a tensor of arbitrary shape or as a prepapred input returned by self.prepare_input
         :return: Virtual replication times as a tensor of the same shape
         """
         x_prep = x if isinstance(x, VelocityModel.X) else self.prepare_input(x)
-        delay_p = self.H(self.delay)
-        t_left = delay_p[x_prep.origin_index_left] + self.G(x_prep.x, self.origins[x_prep.origin_index_left], dtensor([+1.0])) / self.v0
-        t_right = delay_p[x_prep.origin_index_right] + self.G(x_prep.x, self.origins[x_prep.origin_index_right], dtensor([-1.0])) / self.v0
+        delay_virtual = self.H(self.delay)
+        t_left = delay_virtual[x_prep.origin_index_left] + self.G(x_prep.x, self.origins[x_prep.origin_index_left], dtensor([+1.0])) / self.v0
+        t_right = delay_virtual[x_prep.origin_index_right] + self.G(x_prep.x, self.origins[x_prep.origin_index_right], dtensor([-1.0])) / self.v0
+        if not self.is_circular:
+            # surrounding_origins() returns origin index 0 if there is no origin to the left or right on a
+            # linear chromosome. Exclude these, otherwise G() is negative and T(x) precedes the origin firing time.
+            t_left = where(x_prep.x >= self.origins[0], t_left, dtensor(float('inf')))
+            t_right = where(x_prep.x <= self.origins[-1], t_right, dtensor(float('inf')))
         return minimum(t_left, t_right)
 
     def P(self, x: Tensor | X) -> Tensor:
