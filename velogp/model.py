@@ -1071,21 +1071,19 @@ class VelocityModel(nn.Module):
         # from the Eigenbasis because they lie below the variance threshold. Here, we don't explicitly account
         # for these components, which amounts to treating them as being zero (and thus they don't contribute
         # to the squared-distance from the mean)
+        # NOTE: Must not update r in-place, since r may be the cached tensor self.h_prior_prefactor
         if (self.h_basis == "cov"):
             self.update_h_cov_chol()
             r = self.h_prior_prefactor if hyperparameter_dependence else zeros(1)
-            r += 0.5 * sum(self.h_log_raw * matmul(self.h_cov_reduced_canonical(), self.h_log_raw))
-            return r
+            return r + 0.5 * sum(self.h_log_raw * matmul(self.h_cov_reduced_canonical(), self.h_log_raw))
         elif (self.h_basis == "col"):
             self.update_h_cov_chol()
             r = self.h_prior_prefactor if hyperparameter_dependence else zeros(1)
-            r += 0.5 * sum(self.h_log("col") ** 2)
-            return r
+            return r + 0.5 * sum(self.h_log("col") ** 2)
         else:
             self.update_h_cov_eig()
             r = self.h_prior_prefactor if hyperparameter_dependence else zeros(1)
-            r += 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2)
-            return r
+            return r + 0.5 * sum(self.h_log("eigenbasis_scaled") ** 2)
 
     def prior_gdelta(self, hyperparameter_dependence: bool):
         """The prior log-probability of self.g_delta as a realization of independent Gaussians
