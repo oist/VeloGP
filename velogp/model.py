@@ -1216,8 +1216,11 @@ class VelocityModelLoss(nn.Module):
                 if p.grad is not None:
                     p.grad.zero_()
             # Evaluate model at position x_i and compute gradients
-            # TODO: It's unclear why retain_graph=True is necessary here
-            #       Getting rid of this would allow us to re-enable donated buffers
+            # NOTE: retain_graph=True is necessary because scale depends on the parameters (it is
+            #       computed from the model prediction at all locations), and its graph is re-used
+            #       for every k. This is intended, since the gradient of M(x) in Eq. (S1.30) includes
+            #       the dependence of the scale factor on the parameters. Computing the gradient
+            #       of scale once and applying the product rule would allow us to re-enable donated buffers.
             y_pred = scale * self.model(self.x[k])
             y_pred.backward(inputs=[p for n, p in params], retain_graph=True)
             J[k, :] = self.model.pgradient(params, (c, pmap))
