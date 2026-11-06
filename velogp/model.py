@@ -621,8 +621,11 @@ class VelocityModel(nn.Module):
             # Tensors with the same shape as dist which contain 0 respectively h_tgrid[i+1] - h_tgrid[i].
             zeros = zeros_like(dist)
             length = ones_like(dist) * self.h_tgrid_len[(...,) + (None,) * t.dim()]
-            # Tensor containing the length of the intersection of [0, t[j]] and [h_tgrid[i], h_tgrid[i+1]]
-            c = maximum(zeros, minimum(dist, length))
+        # Tensor containing the length of the intersection of [0, t[j]] and [h_tgrid[i], h_tgrid[i+1]]
+        # NOTE: This must be computed outside of no_grad(), otherwise H(t) is not differentiable with
+        #       respect to t (dH/dt = h(t)), and origin delays, which enter T(x) as H(delay), receive
+        #       no gradient.
+        c = maximum(zeros, minimum(dist, length))
         # H(t[j]) = sum_i h[i] * c[i,j]
         return sum(c * exp(self.h_log("canonical")[(...,) + (None,) * t.dim()]), dim=0)
 
