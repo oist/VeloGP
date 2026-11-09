@@ -488,7 +488,7 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         fn_slen = max([len("feature")] + [ len(f.name) for f in VX_FEATURES ])
         cols = [ ('chr', f'U{chr_slen}'), ('begin', np.int32), ('end', np.int32), ('length', np.int32),
                  ('name', f'U{fn_slen}'), ('delayscale', np.float64),
-                 ('g', np.float64), ('v_bps', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64), ('delay_s', np.float64) ]
+                 ('g', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64) ]
         fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f', '%.5f', '%.5f')
         tab = np.zeros(MODEL.g_delta.shape[0], dtype=cols)
         features = list([f for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME])
@@ -499,10 +499,8 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         tab["name"] = [f.name for f in features ]
         tab["delayscale"] = [f.delayscale for f in features ]
         tab["g"] = MODEL.g.detach().numpy()
-        tab["v_bps"] = MODEL.v0.detach().numpy() / MODEL.g.detach().numpy()
         tab["delay_bp"] = MODEL.g_delta.detach().numpy() * MODEL.g_xranges_len.detach().numpy()
-        tab["delay_rel"] = tab["delay_bp"] / MODEL.genome_length
-        tab["delay_s"] = tab["delay_bp"] / MODEL.v0.detach().numpy()
+        tab["delay_rel"] = tab["delay_bp"] / MODEL.genome_length_virtual
         # Write tab-separated to output file
         f = open_file(ARGS.out_vx_feature_delays, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
