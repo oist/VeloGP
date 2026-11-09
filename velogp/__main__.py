@@ -500,7 +500,7 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         tab["delayscale"] = [f.delayscale for f in features ]
         tab["g"] = MODEL.g.detach().numpy()
         tab["delay_bp"] = MODEL.g_delta.detach().numpy() * MODEL.g_xranges_len.detach().numpy()
-        tab["delay_rel"] = tab["delay_bp"] / MODEL.genome_length_virtual
+        tab["delay_rel"] = tab["delay_bp"] / MODEL.genome_length_virtual.detach().numpy()
         # Write tab-separated to output file
         f = open_file(ARGS.out_vx_feature_delays, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
