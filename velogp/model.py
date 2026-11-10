@@ -555,11 +555,24 @@ class TemporalModel(nn.Module):
         else:
             raise ValueError("Invalid basis " + basis)
 
+    def owns(self, parameter: Tensor) -> bool:
+        """ Whether `parameter` is one of the parameters of the temporal model """
+        return (parameter is self.v0_log) or (parameter is self.h_log_raw)
+
     def prior(self, parameter, hyperparameter_dependence: bool):
         if parameter is self.v0_log:
             return zeros([])
         elif parameter is self.h_log_raw:
             return self.prior_hlog(hyperparameter_dependence=hyperparameter_dependence)
+        else:
+            raise RuntimeError("no prior defined for this parameter")
+
+    def prior_precision(self, parameter) -> Tensor | None:
+        """ The inverse covariance matrix of the (approximately) Gaussian prior of `parameter`, or None if there is none """
+        if parameter is self.v0_log:
+            return None
+        elif parameter is self.h_log_raw:
+            return self.h_cov_inv(include_sigma=True)
         else:
             raise RuntimeError("no prior defined for this parameter")
 
@@ -571,12 +584,14 @@ class TemporalModel(nn.Module):
         else:
             raise RuntimeError("no prior distribution defined for this parameter")
 
-class VelocityModel(nn.Module):
+class ChromosomeModel(nn.Module):
     """
-    Model of replisome movement on a single chromosome with velocity v(x,t) = v(t) / g(x)
+    The position-dependent part of the model of replisome movement on a single chromosome
 
-    The time-dependent part v(t) is represented by the `TemporalModel` instance `self.temporal`, the
-    position-dependent part g(x) as well as the origins and their firing delays are part of this class.
+    Holds the chromosome's structure (length, circularity, origins of replication, intervals on which g(x) may
+    differ from 1) and the chromosome-specific parameters, i.e. the origin firing delays and g(x). The
+    time-dependent part v(t) of the velocity v(x,t) = v(t) / g(x) is shared between chromosomes and is passed
+    to the methods which need it as a `TemporalModel` instance.
     """
 
     int32_min : int = -2**31
@@ -587,11 +602,11 @@ class VelocityModel(nn.Module):
         """
         Represents a set of genomic positions, pre-processed for faster model evaluation
 
-        All fields only depend on the positions and on the fixed model structure (genome length, circularity,
+        All fields only depend on the positions and on the fixed model structure (chromosome length, circularity,
         origins, g_xranges), never on fitted parameters, and all have the same shape as x.
         """
         x: Tensor
-        # Indices of the closest origin to the left and right, see `VelocityModel.surrounding_origins()`
+        # Indices of the closest origin to the left and right, see `ChromosomeModel.surrounding_origins()`
         origin_index_left: Tensor
         origin_index_right: Tensor
         # Index i of the cell of g_xgrid containing x, and the offset x - g_xgrid[i]
@@ -607,23 +622,20 @@ class VelocityModel(nn.Module):
         # Whether x coincides with an origin
         at_origin: Tensor
 
-        def __getitem__(self, k) -> VelocityModel.X:
+        def __getitem__(self, k) -> ChromosomeModel.X:
             """ Returns the pre-processed input for the subset x[k] of positions """
-            return VelocityModel.X(*(getattr(self, f.name)[k] for f in dataclasses.fields(self)))
+            return ChromosomeModel.X(*(getattr(self, f.name)[k] for f in dataclasses.fields(self)))
 
-    def __init__(self, genome_length: int, is_circular: bool,
+    def __init__(self, name: str, length: int, is_circular: bool,
                  origins: IntTensor, origin_names: list[str],
-                 h_tgrid: DoubleTensor,
                  g_xranges_l: IntTensor, g_xranges_u: IntTensor,
-                 v0_min: DoubleTensor, v0_max: DoubleTensor,
                  g_delayscale: DoubleTensor | None = None):
         super().__init__()
         with no_grad():
-            # Genome
-            self.genome_length = tensor([genome_length], dtype=torch.int32, requires_grad=False)
+            # Chromosome
+            self.name = name
+            self.length = tensor([length], dtype=torch.int32, requires_grad=False)
             self.is_circular = is_circular
-            # Time-dependent part v(t) = v0 * h(t) of the velocity
-            self.temporal = TemporalModel(h_tgrid, v0_min, v0_max)
             # Origins of replication
             self.origins = origins
             self.origin_names = origin_names
@@ -634,7 +646,7 @@ class VelocityModel(nn.Module):
             assert all(self.origins < cat((self.origins[1:], dtensor([float('inf')])))).detach().item()
             # Origins of replication, augmented to account for wrap-around if the genome is circular
             if self.is_circular:
-                self.origins_augmented = cat((self.origins[-1] - dtensor([genome_length]), self.origins, dtensor([genome_length]) + self.origins[0]))
+                self.origins_augmented = cat((self.origins[-1] - dtensor([length]), self.origins, dtensor([length]) + self.origins[0]))
                 self.origins_augmented.requires_grad = False
             else:
                 self.origins_augmented = self.origins
@@ -660,28 +672,528 @@ class VelocityModel(nn.Module):
             self.g_xgrid.requires_grad = False
             # Floating-point copy of g_xgrid used for lookups with torch.searchsorted()
             self.g_xgrid_double = self.g_xgrid.double()
-            self.g_xgrid_len = cat((self.g_xgrid[1:], dtensor([genome_length]))) - self.g_xgrid
+            self.g_xgrid_len = cat((self.g_xgrid[1:], dtensor([length]))) - self.g_xgrid
             self.g_xgrid_len.requires_grad = False
             self.g_delta_scaled = zeros(self.g_xranges_l.size(), dtype=torch.float64)
             # If provided, g_delayscale specifies for each g range, the magnitudes of the expected delays,
-            # measured relative to the time a single replisome would take to replicate the genome.
+            # measured relative to the time a single replisome would take to replicate the chromosome.
             if g_delayscale is None:
                 self.g_delta_prefactor = ones_like(self.g_delta_scaled)
             else:
                 # Check that we have as many delayscales as g ranges
                 assert (g_delayscale.dim() == 1) and (g_delayscale.size() == self.g_xranges_l.size())
-                self.g_delta_prefactor = g_delayscale.double() * self.genome_length.double() / self.g_xranges_len.double()
+                self.g_delta_prefactor = g_delayscale.double() * self.length.double() / self.g_xranges_len.double()
             self.g_delta_scaled.requires_grad = False
 
+    def clamp_parameters(self):
+        """ Clamp parameters to their respective domains, see `VelocityModel.clamp_parameters()`
+
+        NOTE: Delays are only clamped to be non-negative here. The delays are relative to the time at which the
+        first origin *in the genome* fires, so shifting them such that the smallest delay is zero must be done
+        across all chromosomes, see `VelocityModel.clamp_parameters()`.
+        """
+        with no_grad():
+            assert all(isfinite(self.delay_scaled))
+            self.delay_scaled.clamp_(0.0, math.inf)
+            assert all(isfinite(self.g_delta_scaled))
+            self.g_delta_scaled.clamp_(0.0, 10)
+
+    def owns(self, parameter: Tensor) -> bool:
+        """ Whether `parameter` is one of the parameters of this chromosome """
+        return (parameter is self.delay_scaled) or (parameter is self.g_delta_scaled)
+
+    def delay(self, temporal: TemporalModel) -> Tensor:
+        """ The current value of the origin delays """
+        return self.delay_scaled / (10 * temporal.growthrate)
+
+    def set_delay(self, temporal: TemporalModel, value: Tensor):
+        """ Sets the current value of the origin delays """
+        assert(value.shape == self.delay_scaled.shape)
+        self.delay_scaled.copy_(value * 10.0 * temporal.growthrate)
+
+    @property
+    def g_delta(self) -> Tensor:
+        """ The current value of g_delta ( = g - 1.0 ) """
+        return self.g_delta_scaled * self.g_delta_prefactor
+
+    @g_delta.setter
+    def g_delta(self, value: Tensor):
+        """ Set g_delta ( = g - 1.0 ) to the specified value """
+        assert ((value.dim() == 1) and (value.size(0) == self.g_delta_prefactor.size(0)))
+        assert all(value >= dtensor([0.0]))
+        self.g_delta_scaled = value / self.g_delta_prefactor
+
+    @property
+    def g(self) -> Tensor:
+        """ The current value of g ( = g_delta + 1.0) """
+        return (dtensor([1.0]) + self.g_delta)
+
+    @g.setter
+    def g(self, value: Tensor):
+        """ Set g ( = g_delta + 1.0) to the specified value """
+        assert((value.dim() == 1) and (value.size(0) == self.g_delta_prefactor.size(0)))
+        assert all(value >= dtensor([1.0]))
+        self.g_delta_scaled = (value - dtensor([1.0])) / self.g_delta_prefactor
+
+    @property
+    def length_virtual(self):
+        """ Returns the length of the chromosome in virtual coordinates """
+        return self.length.double() + sum(self.g_delta * self.g_xranges_len)
+
+    def replisome_position(self, temporal: TemporalModel, t: Tensor, origin: Tensor, dir: Tensor, delay: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
+        # Compute distance travelled in virtual coordinates
+        # TODO: We ignore diffusion here atm
+        z = self.G_0(origin) + dir * temporal.v0 * maximum(temporal.H(t) - temporal.H(delay), dtensor([0.0]))
+        # Translate distance travelled to position (plus wrap-around count)
+        if self.is_circular:
+            z_wrap = div(z, self.length_virtual, rounding_mode="floor")
+            z = remainder(z, self.length_virtual)
+        else:
+            z_wrap = zeros_like(z, dtype=bool)
+            z = max(dtensor([0.0]), min(z, self.length_virtual))
+        # Translate position to physical coordinates
+        x = self.G_0_inv(z)
+        # Translate position and wrap-around count to distance travelled in physical coordinates
+        dx = x - origin
+        dx += self.length * z_wrap
+        # Compute instantaneous velocities
+        v = temporal.v_t(t) / self.g_fun(x)
+        return x, dx, v
+
+    def trajectories(self, temporal: TemporalModel, t: Tensor = None) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        # Use grid on which h() is defined if no output times are specified
+        if t is None:
+            t = temporal.h_tgrid
+        # Physical origin firing delays
+        delay = self.delay(temporal)
+        # Create output tensors, one for replisome positions, or for velocities
+        k = 2*numel(self.origins)
+        tab_state = ones(t.shape + (k,), dtype=torch.int32)
+        tab_x = zeros(t.shape + (k,), dtype=torch.float64)
+        tab_dx = zeros(t.shape + (k,), dtype=torch.float64)
+        tab_v = zeros(t.shape + (k,), dtype=torch.float64)
+        for o_i in builtins.range(0, numel(self.origins)):
+            for d_i, d in enumerate([-1, 1]):
+                x, dx, v = self.replisome_position(temporal, t, origin=self.origins[o_i], dir=d, delay=delay[o_i])
+                tab_x[:, 2*o_i + d_i] = x
+                tab_dx[:, 2*o_i + d_i] = dx
+                tab_v[:, 2*o_i + d_i] = v
+        # Determine chromosome meeting points
+        # Iterate over pairs of replisomes moving towards one another
+        # For the first and last origin, there's a pair that wraps around on circular
+        # chromosomes. On linear chromosomes, these chromosomes hit the ends instead of
+        # meeting another chromosome
+        for o_i in builtins.range(0, numel(self.origins) + 1):
+            oi_left = o_i - 1
+            ri_left = 2*oi_left + 1
+            oi_right = o_i
+            ri_right = 2*oi_right
+            # Consider wrap-around for circular chromosomes
+            if self.is_circular:
+                if oi_right >= numel(self.origins):
+                    # On a circular chromosomes this is the same as o_left=-1, o_right=0
+                    break
+                ri_left = ri_left % k
+                oi_left = oi_left % numel(self.origins)
+            # On linear chromosomes, the chromosome ends delimit the first and last segment. There is
+            # no replisome coming from the chromosome end, the replisome simply stops once it reaches it.
+            has_left = oi_left >= 0
+            has_right = oi_right < numel(self.origins)
+            # Get left and right origins (or chromosome ends) and the delays of the origins
+            o_left = self.origins[oi_left] if has_left else dtensor([0.0])
+            d_left = delay[oi_left] if has_left else None
+            o_right = self.origins[oi_right] if has_right else self.length
+            d_right = delay[oi_right] if has_right else None
+            # Virtual time a single replisome needs to traverse the whole segment between the origins
+            # NOTE: Must be careful on a circular genome with a single origin since G(x, x) == 0
+            # TODO: This has to be adapted if G(x,o,d) ever becomes direction-dependent.
+            fudge = tensor(1 if self.is_circular and (o_left == o_right).item() else 0, dtype=torch.int32)
+            u_segment = self.G(o_right - fudge, o_left, d=dtensor([1.0])) / temporal.v0
+            # Virtual firing times of the origins
+            u_left = temporal.H(d_left) if has_left else None
+            u_right = temporal.H(d_right) if has_right else None
+            # If one replisome reaches the opposite origin before that origin fires, the replisome
+            # of the opposite origin never starts and the first replisome stops at the opposite
+            # origin. This mirrors T(), which only considers the two origins surrounding a location.
+            left_fires = has_left and (not has_right or (u_left - u_right < u_segment).item())
+            right_fires = has_right and (not has_left or (u_right - u_left < u_segment).item())
+            # Compute time at which the segment is fully replicated
+            # TODO: We ignore diffusion here atm
+            if left_fires and right_fires:
+                t_meet = temporal.Hinv((u_segment + u_left + u_right) / 2.0)
+            elif left_fires:
+                t_meet = temporal.Hinv(u_left + u_segment)
+            else:
+                t_meet = temporal.Hinv(u_right + u_segment)
+            # Before replisome creation (or forever, if it is never created),
+            # state = 0, position = origin, distance = 0.0, v = nan
+            if has_left:
+                w = (t < d_left) if left_fires else ones_like(t, dtype=torch.bool)
+                tab_state[w, ri_left] = 0
+                tab_x[w, ri_left] = o_left.double()
+                tab_dx[w, ri_left] = 0.0
+                tab_v[w, ri_left] = nan
+            if has_right:
+                w = (t < d_right) if right_fires else ones_like(t, dtype=torch.bool)
+                tab_state[w, ri_right] = 0
+                tab_x[w, ri_right] = o_right.double()
+                tab_dx[w, ri_right] = 0.0
+                tab_v[w, ri_right] = nan
+            # After the segment is replicated, state = 2, position = meeting point, distance = dist. travelled, v = nan
+            w = t > t_meet
+            if left_fires:
+                x_meet_left, dx_meet_left, _ = self.replisome_position(temporal, t_meet, origin=o_left, dir=dtensor([+1.0]), delay=d_left)
+                tab_state[w, ri_left] = 2
+                tab_x[w, ri_left] = x_meet_left
+                tab_dx[w, ri_left] = dx_meet_left
+                tab_v[w, ri_left] = nan
+            if right_fires:
+                x_meet_right, dx_meet_right, _ = self.replisome_position(temporal, t_meet, origin=o_right, dir=dtensor([-1.0]), delay=d_right)
+                tab_state[w, ri_right] = 2
+                tab_x[w, ri_right] = x_meet_right
+                tab_dx[w, ri_right] = dx_meet_right
+                tab_v[w, ri_right] = nan
+        # Remove first row which ri_right to the entry t=0 we added at the top
+        return tab_state, tab_x, tab_dx, tab_v
+
+    def G_0(self, x: Tensor) -> Tensor:
+        """
+        Evaluates G_0(x) = int_0^x g(u) du
+
+        g(x) is piece-wise constant and = 1 except on the intervals [g_xranges_l[i], g_xranges_u[i]] where g(x) = g[i].
+
+        :param x:  Locations as a tensor of arbitrary shape
+        :return: G(x,o) as a tensor of the same shape as x
+        """
+        assert all(logical_and(x >= tensor([0]), x <= tensor([self.length])))
+        g, G = self.g_grid_values()
+        idx, offset = self.g_grid_locate(x)
+        return G[idx] + offset * g[idx]
+
+    def g_grid_values(self) -> Tuple[Tensor, Tensor]:
+        """
+        Returns the values of g(x) and G_0(x) on the grid g_xgrid
+
+        :return: Pair (g, G) where g[i] is the value of g(x) on [g_xgrid[i], g_xgrid[i+1]) and G[i] = G_0(g_xgrid[i]).
+        G contains one more element than g, the last element is G_0(L), where L is the length of the genome.
+        """
+        g = cat((dtensor([1.0]), flatten(stack((self.g, ones_like(self.g_delta_scaled)), dim=1))))
+        G = cat((dtensor([0.0]), torch.cumsum(self.g_xgrid_len * g, dim=0)))
+        return g, G
+
+    def g_grid_locate(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Locates positions x on the grid g_xgrid
+
+        :param x: Locations as a tensor of arbitrary shape
+        :return: Pair (i, d) of tensors with the same shape as x where i is the index of the grid cell containing x,
+        i.e. g_xgrid[i] <= x < g_xgrid[i+1], and d = x - g_xgrid[i] the offset of x within that cell
+        """
+        with no_grad():
+            idx = grid_index(self.g_xgrid_double, x)
+            return idx, x.double() - self.g_xgrid_double[idx]
+
+    def G_0_inv(self, z: Tensor):
+        """
+        Evaluates G_0^-1(z) for the specified points z
+
+        :param u: Points at which to evaluate G_0^-1
+        :return: G_0^-1(u) at the specified points u
+        """
+
+        assert all(z >= 0)
+        # Values of g(x) and G_0(x) at the grid points g_xgrid
+        # Note: We add an extra point at the end to account for numerical
+        # inaccuracies in z. Other than x, which is an integer tensor, z
+        # is a floating-point tensor!
+        g, Gp = self.g_grid_values()
+        G = cat((Gp, Gp[-1, None]+1), dim=0)
+        assert all(z < G[-1])
+        # Find x_i where G(x_i) <= z but G(x_(i+1)) > z
+        with no_grad():
+            idx = grid_index(G, z)
+            # z = G_0(L) (i.e. the chromosome end) lies in the extra cell added above, map it to the last
+            # real grid cell. This happens for replisomes that reached the end of a linear chromosome.
+            idx = clamp(idx, max=numel(self.g_xgrid) - 1)
+        # Within [z_i, z_(i+1)] the function G is linear, i.e.
+        #   G(t) = G(z_i) + (z - z_i) * g[i]
+        # and its inverse is thus
+        #   G^-1(z) = z_i + (z - G(z_i)) / g[i]
+        return self.g_xgrid[idx] + (z - G[idx]) / g[idx]
+
+    def G(self, x: Tensor, o: Tensor, d: Tensor) -> Tensor:
+        """
+        Evaluates G(x,o) = | int_p g(u) du | for the triples (x, o, d) where p is a path from o to x in direction d.
+
+        g(x) is piece-wise constant and = 1 except on the intervals [g_xranges_l[i], g_xranges_u[i]] where g(x) = g[i].
+
+        :param x:  Genomic locations as a tensor of arbitrary shape
+        :param o: Origins as tensor of the same shape as x
+        :return: G(x,o) as a tensor of the same shape as x
+        """
+        result = (self.G_0(x) - self.G_0(o)) * sign(d)
+        if self.is_circular:
+            wrap = logical_or(logical_and(x < o, d > tensor([0])), logical_and(o < x, d < tensor([0])))
+            result = where(wrap, result + self.G_0(self.length), result)
+        return result
+
+    def g_fun(self, x: Tensor):
+        # Find i where x_grid[i] <= x but x_grid[i+1] > x and return g[i]
+        g, _ = self.g_grid_values()
+        idx, _ = self.g_grid_locate(x)
+        return g[idx]
+
+
+    def surrounding_origins(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Returns a pair (l, r) of tensors of the same shape as x containing the closest left and right origin location
+
+        :param x: tensor containing genomic locations
+        :return: pair (l, r) of tensors containg the closest left and right origin location
+        """
+        assert all(logical_and(x >= tensor([0]), x <= tensor([self.length])))
+        # Compute distance between locations x and origins
+        # Note: For origins o_1,o_2,...,o_k on a circular genome of length L,
+        #       origins_augmented contains o_0 = -(L - o_k), o_1, ..., o_k, o_(k+1) = L + o_1
+        dist = x[None,...] - self.origins_augmented[(...,) + (None,) * x.dim()]
+        k = self.origins.size()[0]
+        # Find index of closest origin to the left of each x
+        l_idx = argmin(where(dist >= tensor([0]), dist, tensor([self.int32_max])), dim=0)
+        if self.is_circular:
+            # If the closest origin is o_0, it's actually o_k and the path wraps around the circular genome
+            l_idx = where(l_idx == tensor([0]), tensor([k]), l_idx) - tensor([1])
+        # Find index of closest origin to the right of each x
+        r_idx = argmax(where(dist <= tensor([0]), dist, tensor([self.int32_min])), dim=0)
+        if self.is_circular:
+            # If the closest origin is o_(k+1), it's actually o_1 and the path wraps around the circular genome
+            r_idx = where(r_idx == tensor([k+1]), tensor([1]), r_idx) - tensor([1])
+        # Return origin positions
+        return l_idx, r_idx
+
+    def prepare_input(self, x: Tensor):
+        """ Performs parameter-independent computations on the model input (i.e. tensor containing genomic locations),
+        and returns a `ChromosomeModel.X` instance that represents the processed input. Passing this to `self.T()`
+        speeds up the computation.
+
+        :param x: tensor containing genomic locations
+        :return: `ChromosomeModel.X` instance containing pre-processed input
+        """
+        assert all((x >= tensor([0], dtype=torch.int32)) & (x <= tensor([self.length], dtype=torch.int32)))
+        with no_grad():
+            (i_left, i_right) = self.surrounding_origins(x)
+            o_left, o_right = self.origins[i_left], self.origins[i_right]
+            g_index, g_offset = self.g_grid_locate(x)
+            if self.is_circular:
+                # See G(): the path from o in direction d to x wraps around if x < o for d = +1 or o < x for d = -1
+                wrap_left, wrap_right = x < o_left, o_right < x
+                has_left = has_right = ones_like(x, dtype=torch.bool)
+            else:
+                wrap_left = wrap_right = zeros_like(x, dtype=torch.bool)
+                # surrounding_origins() returns origin index 0 if there is no origin to the left or right
+                has_left, has_right = x >= self.origins[0], x <= self.origins[-1]
+            at_origin = x == o_left
+        return ChromosomeModel.X(x, i_left, i_right, g_index, g_offset, wrap_left, wrap_right,
+                               has_left, has_right, at_origin)
+
+    def T(self, x: Tensor | X, temporal: TemporalModel) -> Tensor:
+        """Returns the virtual replication time T(x)
+
+        T(x) = min { H(Delta_l) + int_(o_l)^x g(u)/v0 du, H(Delta_r) + int_x^(o_r) g(u)/v0 du }, which is the virtual
+        time at which the location x, surrounded by origins o_l on the left and o_r on the right is replicated.
+        Delta_l, Delta_r are the (physical) delays with which these origins fire, see Eq. (S1.6). On linear
+        chromosomes, locations left of the first or right of the last origin have only one surrounding origin.
+
+        A location x = o_i that coincides with an origin is its own left and right surrounding origin. Such a
+        location is replicated either when o_i fires, or when the replisome of one of the adjacent origins
+        o_(i-1), o_(i+1) reaches o_i, whichever happens first. Replisomes still stop at the adjacent origin, i.e.
+        locations beyond o_i are never replicated by the replisomes of o_(i-1) respectively o_(i+1).
+
+        :param x: Genomic locations as a tensor of arbitrary shape or as a prepapred input returned by self.prepare_input
+        :param temporal: The time-dependent part of the model
+        :return: Virtual replication times as a tensor of the same shape
+        """
+        x_prep = x if isinstance(x, ChromosomeModel.X) else self.prepare_input(x)
+        delay_virtual = temporal.H(self.delay(temporal))
+        # Evaluate G(x, o_l, +1) and G(x, o_r, -1), see G(), using the pre-processed input
+        g, G = self.g_grid_values()
+        G_0_x = G[x_prep.g_index] + x_prep.g_offset * g[x_prep.g_index]
+        G_0_origins = self.G_0(self.origins)
+        G_0_L = G[-1]
+        G_left = where(x_prep.wrap_left, G_0_L, 0.0) + (G_0_x - G_0_origins[x_prep.origin_index_left])
+        G_right = where(x_prep.wrap_right, G_0_L, 0.0) - (G_0_x - G_0_origins[x_prep.origin_index_right])
+        t_left = delay_virtual[x_prep.origin_index_left] + G_left / temporal.v0
+        t_right = delay_virtual[x_prep.origin_index_right] + G_right / temporal.v0
+        # Virtual times at which the replisomes of the adjacent origins o_(i-1) and o_(i+1) reach origin o_i
+        origins_prev, delay_virtual_prev = roll(self.origins, 1), roll(delay_virtual, 1)
+        origins_next, delay_virtual_next = roll(self.origins, -1), roll(delay_virtual, -1)
+        arrival_from_prev = delay_virtual_prev + self.G(self.origins, origins_prev, dtensor([+1.0])) / temporal.v0
+        arrival_from_next = delay_virtual_next + self.G(self.origins, origins_next, dtensor([-1.0])) / temporal.v0
+        if not self.is_circular:
+            # surrounding_origins() returns origin index 0 if there is no origin to the left or right on a
+            # linear chromosome. Exclude these, otherwise G() is negative and T(x) precedes the origin firing time.
+            t_left = where(x_prep.has_left, t_left, dtensor(float('inf')))
+            t_right = where(x_prep.has_right, t_right, dtensor(float('inf')))
+            # The first origin has no left neighbour and the last origin no right neighbour on a linear chromosome
+            is_first = arange(numel(self.origins)) == 0
+            is_last = arange(numel(self.origins)) == numel(self.origins) - 1
+            arrival_from_prev = where(is_first, dtensor(float('inf')), arrival_from_prev)
+            arrival_from_next = where(is_last, dtensor(float('inf')), arrival_from_next)
+        arrival_from_adjacent = minimum(arrival_from_prev, arrival_from_next)
+        # Locations that coincide with an origin are also replicated by the replisomes of the adjacent origins
+        t = minimum(t_left, t_right)
+        return where(x_prep.at_origin, minimum(t, arrival_from_adjacent[x_prep.origin_index_left]), t)
+
+    def prior_gdelta(self, hyperparameter_dependence: bool):
+        """The prior log-probability of self.g_delta as a realization of independent Gaussians
+
+        Returns the negative log-probability (or, rather, log-density) of self.g_delta as samples of independent
+        Exponential distribution with mean self.g_delta_prefactor. Since g_delta = g_delta_scaled * g_delta_prefactor, if
+        g_delta follows an exp. dist. with mean self.g_delta_prefactor, g_delta_scaled follows an exp. dist with mean 1.0.
+
+        :param hdependent_only: Whether to return the full density, or only the g_delta-dependent terms
+
+        TODO: Is there really no hyperparameter-dependent term?
+        """
+        return sum(abs(self.g_delta_scaled))
+
+    def prior(self, parameter, hyperparameter_dependence: bool):
+        if parameter is self.delay_scaled:
+            return zeros([])
+        elif parameter is self.g_delta_scaled:
+            return self.prior_gdelta(hyperparameter_dependence=hyperparameter_dependence)
+        else:
+            raise RuntimeError("no prior defined for this parameter")
+
+    def prior_precision(self, parameter) -> Tensor | None:
+        """ The inverse covariance matrix of the (approximately) Gaussian prior of `parameter`, or None if there is none """
+        if parameter is self.delay_scaled:
+            return None
+        elif parameter is self.g_delta_scaled:
+            # NOTE: This is only a very rough approximation since the prior on g_delta IS NOT Gaussian.
+            return diagflat(dtensor([1.0]) / self.g_delta_prefactor ** 2)
+        else:
+            raise RuntimeError("no Gaussian prior defined for this parameter")
+
+    def sample_prior(self, parameter):
+        if parameter is self.delay_scaled:
+            return torch.distributions.exponential.Exponential(dtensor(1.0)).sample(parameter.shape).squeeze()
+        elif parameter is self.g_delta_scaled:
+            return torch.distributions.exponential.Exponential(dtensor(1.0)).sample(parameter.shape).squeeze()
+        else:
+            raise RuntimeError("no prior distribution defined for this parameter")
+
+class VelocityModel(nn.Module):
+    """
+    Model of replisome movement on a genome comprising one or more chromosomes
+
+    The replication velocity v(x,t) = v(t) / g(x) is the product of a time-dependent part v(t), represented by the
+    `TemporalModel` instance `self.temporal` and shared by all chromosomes, and a position-dependent part g(x).
+    The latter, together with the origins of replication and their firing delays, is specific to each chromosome
+    and represented by the `ChromosomeModel` instances in `self.chromosomes`.
+    """
+
+    @dataclass
+    class X:
+        """
+        Represents a set of genomic positions on one or more chromosomes, pre-processed for faster model evaluation
+
+        The positions are grouped by chromosome: `parts[i]` holds the positions on chromosome i as a 1-d
+        `ChromosomeModel.X`, and `indices[i]` their indices within the flattened input. `inverse` maps the
+        concatenation of the per-chromosome parts back to the order of the flattened input, i.e. the position
+        with index j in the flattened input is element `inverse[j]` of the concatenation. `part[j]` and `offset[j]`
+        are the part containing the j-th position of the flattened input and its index within that part.
+        `shape` is the shape of the input.
+        """
+        shape: torch.Size
+        parts: list[ChromosomeModel.X]
+        indices: list[Tensor]
+        inverse: Tensor
+        part: Tensor
+        offset: Tensor
+
+        @staticmethod
+        def make(shape: torch.Size, parts: list[ChromosomeModel.X], indices: list[Tensor]) -> VelocityModel.X:
+            """ Creates an instance from the per-chromosome parts and their indices within the flattened input """
+            with no_grad():
+                order = cat(indices)
+                inverse = empty_like(order)
+                inverse[order] = arange(numel(order))
+                part = cat([full((numel(ix),), i, dtype=torch.long) for i, ix in enumerate(indices)])[inverse]
+                offset = cat([arange(numel(ix)) for ix in indices])[inverse]
+            return VelocityModel.X(shape, parts, indices, inverse, part, offset)
+
+        def __getitem__(self, k) -> VelocityModel.X:
+            """ Returns the pre-processed input for the subset x[k] of positions """
+            with no_grad():
+                # Indices (into the flattened input) of the selected positions, in the order of x[k]
+                selected = arange(numel(self.inverse)).reshape(self.shape)[k]
+                s = selected.reshape(-1)
+                s_part, s_offset = self.part[s], self.offset[s]
+                parts, indices = [], []
+                for i, p in enumerate(self.parts):
+                    j = nonzero(s_part == i).reshape(-1)
+                    parts.append(p[s_offset[j]])
+                    indices.append(j)
+            return VelocityModel.X.make(selected.shape, parts, indices)
+
+    def __init__(self, temporal: TemporalModel, chromosomes: List[ChromosomeModel]):
+        """
+        Creates a model for a genome with the given chromosomes
+
+        :param temporal: The time-dependent part of the model, shared by all chromosomes
+        :param chromosomes: The chromosomes of the genome, the chromosome names must be unique
+        """
+        super().__init__()
+        assert len(chromosomes) > 0
+        assert len(set(c.name for c in chromosomes)) == len(chromosomes), "chromosome names must be unique"
+        self.temporal = temporal
+        # NOTE: We use a list instead of a nn.ModuleDict because chromosome names may contain '.', which
+        # nn.ModuleDict does not allow. Parameter names are therefore 'chromosomes.<index>.<parameter>'.
+        self.chromosomes = nn.ModuleList(chromosomes)
+
+    @classmethod
+    def single_chromosome(cls, genome_length: int, is_circular: bool,
+                          origins: IntTensor, origin_names: list[str],
+                          h_tgrid: DoubleTensor,
+                          g_xranges_l: IntTensor, g_xranges_u: IntTensor,
+                          v0_min: DoubleTensor, v0_max: DoubleTensor,
+                          g_delayscale: DoubleTensor | None = None,
+                          name: str = "chromosome") -> VelocityModel:
+        """ Creates a model for a genome comprising a single chromosome """
+        temporal = TemporalModel(h_tgrid, v0_min, v0_max)
+        chromosome = ChromosomeModel(name, genome_length, is_circular, origins, origin_names,
+                                     g_xranges_l, g_xranges_u, g_delayscale)
+        return cls(temporal, [chromosome])
+
     def __setattr__(self, name: str, value: Any):
-        # Catch assignments like `model.h_log_raw = ...` that should go to `model.temporal`. Without this check, they
-        # would silently create a new attribute that the model never uses.
-        temporal = self.__dict__.get("_modules", {}).get("temporal")
-        if ((temporal is not None) and hasattr(temporal, name) and not hasattr(type(self), name)
-                and (name not in self.__dict__) and (name not in self._parameters)
-                and (name not in self._buffers) and (name not in self._modules)):
-            raise AttributeError(f"'{name}' is an attribute of the temporal model, use `model.temporal.{name}`")
+        # Catch assignments like `model.h_log_raw = ...` or `model.g_delta = ...` that should go to the temporal
+        # model or to a chromosome. Without this check, they would silently create a new attribute that the model
+        # never uses.
+        modules = self.__dict__.get("_modules", {})
+        if (not hasattr(type(self), name) and (name not in self.__dict__) and (name not in self._parameters)
+                and (name not in self._buffers) and (name not in modules)):
+            temporal, chromosomes = modules.get("temporal"), modules.get("chromosomes")
+            if (temporal is not None) and hasattr(temporal, name):
+                raise AttributeError(f"'{name}' is an attribute of the temporal model, use `model.temporal.{name}`")
+            if (chromosomes is not None) and builtins.any(hasattr(c, name) for c in chromosomes):
+                raise AttributeError(f"'{name}' is an attribute of the chromosome models, use "
+                                     f"`model.chromosomes[i].{name}` or `model.chromosome(name).{name}`")
         super().__setattr__(name, value)
+
+    def chromosome_index(self, chromosome: str | int) -> int:
+        """ Returns the index of the chromosome with the given name (or the index itself if passed an index) """
+        if isinstance(chromosome, builtins.int):
+            if not (0 <= chromosome < len(self.chromosomes)):
+                raise IndexError(f"chromosome index {chromosome} out of range")
+            return chromosome
+        for i, c in enumerate(self.chromosomes):
+            if c.name == chromosome:
+                return i
+        raise KeyError(f"unknown chromosome {chromosome}")
+
+    def chromosome(self, chromosome: str | int) -> ChromosomeModel:
+        """ Returns the chromosome with the given name or index """
+        return self.chromosomes[self.chromosome_index(chromosome)]
 
     def clamp_parameters(self):
         """ Clamp parameters to their respective domains """
@@ -691,12 +1203,22 @@ class VelocityModel(nn.Module):
         # updates are forbidding while auto-grad is active, but that's OK, this
         # function should be called *before* the model is evaluated.
         with no_grad():
-            assert all(isfinite(self.delay_scaled))
-            self.delay_scaled.clamp_(0.0, math.inf)
-            self.delay_scaled[:] -= min(self.delay_scaled)
-            assert all(isfinite(self.g_delta_scaled))
-            self.g_delta_scaled.clamp_(0.0, 10)
+            for c in self.chromosomes:
+                c.clamp_parameters()
+            # Delays are measured relative to the time at which the first origin in the *genome* fires
+            delay_min = min(cat([c.delay_scaled for c in self.chromosomes]))
+            for c in self.chromosomes:
+                c.delay_scaled[:] -= delay_min
             self.temporal.clamp_parameters()
+
+    def owner(self, parameter: Tensor) -> TemporalModel | ChromosomeModel:
+        """ Returns the sub-model (the temporal model or one of the chromosomes) that `parameter` belongs to """
+        if self.temporal.owns(parameter):
+            return self.temporal
+        for c in self.chromosomes:
+            if c.owns(parameter):
+                return c
+        raise RuntimeError("parameter does not belong to this model")
 
     def resolve_params(self, params: List[nn.Parameter | str] | List[Tuple[str, nn.Parameter]], strict=True) -> List[Tuple[str, nn.Parameter]]:
         """ Converts a list of either `nn.Parameter` instances *or* parameter names into a list of (name, `nn.Parameter`) tuples """
@@ -801,159 +1323,81 @@ class VelocityModel(nn.Module):
                 g[ci:(ci + ni)] = pi.grad
         return g
 
-    @property
-    def delay(self) -> Tensor:
-        """ The current value of the origin delays """
-        return self.delay_scaled / (10 * self.temporal.growthrate)
+    def prepare_input(self, x: Tensor, chromosome: str | int | List[str | int] | Tensor | None = None) -> VelocityModel.X:
+        """
+        Performs parameter-independent computations on the model input (i.e. tensor containing genomic locations),
+        and returns a `VelocityModel.X` instance that represents the processed input. Passing this to `self.forward()`
+        speeds up the computation.
 
-    @delay.setter
-    def delay(self, value: Tensor):
-        """ Sets the current value of the origin delays """
-        assert(value.shape == self.delay_scaled.shape)
-        self.delay_scaled.copy_(value * 10.0 * self.temporal.growthrate)
+        :param x: tensor containing genomic locations
+        :param chromosome: the chromosome(s) containing the locations. Either a single chromosome name or index which
+        applies to all locations, a list of names or indices or an integer tensor of indices with one entry per
+        location, or None if the genome comprises only a single chromosome.
+        :return: `VelocityModel.X` instance containing pre-processed input
+        """
+        with no_grad():
+            # Determine the index of the chromosome containing each location
+            if chromosome is None:
+                if len(self.chromosomes) != 1:
+                    raise ValueError("chromosome must be specified if the genome comprises more than one chromosome")
+                c_idx = zeros(x.shape, dtype=torch.long)
+            elif isinstance(chromosome, (str, builtins.int)):
+                c_idx = full(x.shape, self.chromosome_index(chromosome), dtype=torch.long)
+            elif isinstance(chromosome, Tensor):
+                c_idx = chromosome.long()
+            else:
+                c_idx = tensor([self.chromosome_index(c) for c in chromosome], dtype=torch.long)
+            if c_idx.shape != x.shape:
+                raise ValueError("chromosome must have the same shape as x")
+            # Pre-process the locations on each chromosome
+            x_flat, c_flat = x.reshape(-1), c_idx.reshape(-1)
+            parts, indices = [], []
+            for i, c in enumerate(self.chromosomes):
+                ix = nonzero(c_flat == i).reshape(-1)
+                parts.append(c.prepare_input(x_flat[ix]))
+                indices.append(ix)
+        return VelocityModel.X.make(x.shape, parts, indices)
 
-    @property
-    def g_delta(self) -> Tensor:
-        """ The current value of g_delta ( = g - 1.0 ) """
-        return self.g_delta_scaled * self.g_delta_prefactor
+    def T(self, x: Tensor | X) -> Tensor:
+        """Returns the virtual replication time T(x), see `ChromosomeModel.T()`
 
-    @g_delta.setter
-    def g_delta(self, value: Tensor):
-        """ Set g_delta ( = g - 1.0 ) to the specified value """
-        assert ((value.dim() == 1) and (value.size(0) == self.g_delta_prefactor.size(0)))
-        assert all(value >= dtensor([0.0]))
-        self.g_delta_scaled = value / self.g_delta_prefactor
+        :param x: Genomic locations as a tensor of arbitrary shape or as a prepared input returned by
+        self.prepare_input. Passing a tensor is only possible if the genome comprises a single chromosome.
+        :return: Virtual replication times as a tensor of the same shape
+        """
+        x_prep = x if isinstance(x, VelocityModel.X) else self.prepare_input(x)
+        t = [c.T(p, self.temporal) for c, p in zip(self.chromosomes, x_prep.parts) if numel(p.x) > 0]
+        if len(t) == 0:
+            return zeros(x_prep.shape, dtype=torch.float64)
+        return cat(t)[x_prep.inverse].reshape(x_prep.shape)
 
-    @property
-    def g(self) -> Tensor:
-        """ The current value of g ( = g_delta + 1.0) """
-        return (dtensor([1.0]) + self.g_delta)
+    def P(self, x: Tensor | X) -> Tensor:
+        """Returns the predicted DNA abundance P(x)
 
-    @g.setter
-    def g(self, value: Tensor):
-        """ Set g ( = g_delta + 1.0) to the specified value """
-        assert((value.dim() == 1) and (value.size(0) == self.g_delta_prefactor.size(0)))
-        assert all(value >= dtensor([1.0]))
-        self.g_delta_scaled = (value - dtensor([1.0])) / self.g_delta_prefactor
+        :param x: Genomic locations as a tensor of arbitrary shape or as a prepared input returned by
+        self.prepare_input. Passing a tensor is only possible if the genome comprises a single chromosome.
+        :return: Predicted DNA abundance
+        """
+        return exp(- self.temporal.growthrate * self.temporal.Hinv(self.T(x)))
 
-    @property
-    def genome_length_virtual(self):
-        """ Returns the length of the genome in virtual coordinates """
-        return self.genome_length.double() + sum(self.g_delta * self.g_xranges_len)
-
-    def replisome_position(self, t: Tensor, origin: Tensor, dir: Tensor, delay: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
-        # Compute distance travelled in virtual coordinates
-        # TODO: We ignore diffusion here atm
-        z = self.G_0(origin) + dir * self.temporal.v0 * maximum(self.temporal.H(t) - self.temporal.H(delay), dtensor([0.0]))
-        # Translate distance travelled to position (plus wrap-around count)
-        if self.is_circular:
-            z_wrap = div(z, self.genome_length_virtual, rounding_mode="floor")
-            z = remainder(z, self.genome_length_virtual)
-        else:
-            z_wrap = zeros_like(z, dtype=bool)
-            z = max(dtensor([0.0]), min(z, self.genome_length_virtual))
-        # Translate position to physical coordinates
-        x = self.G_0_inv(z)
-        # Translate position and wrap-around count to distance travelled in physical coordinates
-        dx = x - origin
-        dx += self.genome_length * z_wrap
-        # Compute instantaneous velocities
-        v = self.temporal.v_t(t) / self.g_fun(x)
-        return x, dx, v
+    def forward(self, x: Tensor | X):
+        return self.P(x)
 
     def trajectories(self, t: Tensor = None) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-        # Use grid on which h() is defined if no output times are specified
-        if t is None:
-            t = self.temporal.h_tgrid
-        # Create output tensors, one for replisome positions, or for velocities
-        k = 2*numel(self.origins)
-        tab_state = ones(t.shape + (k,), dtype=torch.int32)
-        tab_x = zeros(t.shape + (k,), dtype=torch.float64)
-        tab_dx = zeros(t.shape + (k,), dtype=torch.float64)
-        tab_v = zeros(t.shape + (k,), dtype=torch.float64)
-        for o_i in builtins.range(0, numel(self.origins)):
-            for d_i, d in enumerate([-1, 1]):
-                x, dx, v = self.replisome_position(t, origin=self.origins[o_i], dir=d, delay=self.delay[o_i])
-                tab_x[:, 2*o_i + d_i] = x
-                tab_dx[:, 2*o_i + d_i] = dx
-                tab_v[:, 2*o_i + d_i] = v
-        # Determine chromosome meeting points
-        # Iterate over pairs of replisomes moving towards one another
-        # For the first and last origin, there's a pair that wraps around on circular
-        # chromosomes. On linear chromosomes, these chromosomes hit the ends instead of
-        # meeting another chromosome
-        for o_i in builtins.range(0, numel(self.origins) + 1):
-            oi_left = o_i - 1
-            ri_left = 2*oi_left + 1
-            oi_right = o_i
-            ri_right = 2*oi_right
-            # Consider wrap-around for circular chromosomes
-            if self.is_circular:
-                if oi_right >= numel(self.origins):
-                    # On a circular chromosomes this is the same as o_left=-1, o_right=0
-                    break
-                ri_left = ri_left % k
-                oi_left = oi_left % numel(self.origins)
-            # On linear chromosomes, the chromosome ends delimit the first and last segment. There is
-            # no replisome coming from the chromosome end, the replisome simply stops once it reaches it.
-            has_left = oi_left >= 0
-            has_right = oi_right < numel(self.origins)
-            # Get left and right origins (or chromosome ends) and the delays of the origins
-            o_left = self.origins[oi_left] if has_left else dtensor([0.0])
-            d_left = self.delay[oi_left] if has_left else None
-            o_right = self.origins[oi_right] if has_right else self.genome_length
-            d_right = self.delay[oi_right] if has_right else None
-            # Virtual time a single replisome needs to traverse the whole segment between the origins
-            # NOTE: Must be careful on a circular genome with a single origin since G(x, x) == 0
-            # TODO: This has to be adapted if G(x,o,d) ever becomes direction-dependent.
-            fudge = tensor(1 if self.is_circular and (o_left == o_right).item() else 0, dtype=torch.int32)
-            u_segment = self.G(o_right - fudge, o_left, d=dtensor([1.0])) / self.temporal.v0
-            # Virtual firing times of the origins
-            u_left = self.temporal.H(d_left) if has_left else None
-            u_right = self.temporal.H(d_right) if has_right else None
-            # If one replisome reaches the opposite origin before that origin fires, the replisome
-            # of the opposite origin never starts and the first replisome stops at the opposite
-            # origin. This mirrors T(), which only considers the two origins surrounding a location.
-            left_fires = has_left and (not has_right or (u_left - u_right < u_segment).item())
-            right_fires = has_right and (not has_left or (u_right - u_left < u_segment).item())
-            # Compute time at which the segment is fully replicated
-            # TODO: We ignore diffusion here atm
-            if left_fires and right_fires:
-                t_meet = self.temporal.Hinv((u_segment + u_left + u_right) / 2.0)
-            elif left_fires:
-                t_meet = self.temporal.Hinv(u_left + u_segment)
-            else:
-                t_meet = self.temporal.Hinv(u_right + u_segment)
-            # Before replisome creation (or forever, if it is never created),
-            # state = 0, position = origin, distance = 0.0, v = nan
-            if has_left:
-                w = (t < d_left) if left_fires else ones_like(t, dtype=torch.bool)
-                tab_state[w, ri_left] = 0
-                tab_x[w, ri_left] = o_left.double()
-                tab_dx[w, ri_left] = 0.0
-                tab_v[w, ri_left] = nan
-            if has_right:
-                w = (t < d_right) if right_fires else ones_like(t, dtype=torch.bool)
-                tab_state[w, ri_right] = 0
-                tab_x[w, ri_right] = o_right.double()
-                tab_dx[w, ri_right] = 0.0
-                tab_v[w, ri_right] = nan
-            # After the segment is replicated, state = 2, position = meeting point, distance = dist. travelled, v = nan
-            w = t > t_meet
-            if left_fires:
-                x_meet_left, dx_meet_left, _ = self.replisome_position(t_meet, origin=o_left, dir=dtensor([+1.0]), delay=d_left)
-                tab_state[w, ri_left] = 2
-                tab_x[w, ri_left] = x_meet_left
-                tab_dx[w, ri_left] = dx_meet_left
-                tab_v[w, ri_left] = nan
-            if right_fires:
-                x_meet_right, dx_meet_right, _ = self.replisome_position(t_meet, origin=o_right, dir=dtensor([-1.0]), delay=d_right)
-                tab_state[w, ri_right] = 2
-                tab_x[w, ri_right] = x_meet_right
-                tab_dx[w, ri_right] = dx_meet_right
-                tab_v[w, ri_right] = nan
-        # Remove first row which ri_right to the entry t=0 we added at the top
-        return tab_state, tab_x, tab_dx, tab_v
+        """
+        Returns the replisome trajectories for all chromosomes, see `ChromosomeModel.trajectories()`
+
+        The last dimension of the returned tensors enumerates the replisomes, the replisomes of chromosome
+        `self.chromosomes[i]` follow those of chromosome `self.chromosomes[i-1]`.
+        """
+        r = [c.trajectories(self.temporal, t) for c in self.chromosomes]
+        return tuple(cat(parts, dim=-1) for parts in zip(*r))
+
+    def prior(self, parameter, hyperparameter_dependence: bool):
+        return self.owner(parameter).prior(parameter, hyperparameter_dependence)
+
+    def sample_prior(self, parameter):
+        return self.owner(parameter).sample_prior(parameter)
 
     def v_t_posterior_stderr(self, t: Tensor,
                              loss: VelocityModelLoss | None = None,
@@ -1018,19 +1462,15 @@ class VelocityModel(nn.Module):
         # Compute dM^T diag(1/s_1^2, ..., 1/s_N^2) dM
         u = einsum("ji,j,jk->ik", dM, loss.weights, dM).clone()
         if not ignore_priors:
-            # Add Sigma_h^-1 for h_log_raw, which has a GP prior
-            # We do this by querying the parameter map to find the
-            # sub-matrix of u that corresponds to the parameter h_log_raw,
-            # and adding the inverse of its prior covariance matrix
-            if "temporal.h_log_raw" in pmap:
-                i, l = pmap["temporal.h_log_raw"], numel(self.temporal.h_log_raw)
-                u[i:(i+l), i:(i+l)] += self.temporal.h_cov_inv(include_sigma=True)
-            # Add prior for g_delta
-            # NOTE: This is only a very rough approximation since the prior
-            # on g_delta IS NOT Gaussian.
-            if "g_delta_scaled" in pmap:
-                i, l = pmap["g_delta_scaled"], numel(self.g_delta_scaled)
-                u[i:(i+l), i:(i+l)] += diagflat(dtensor([1.0]) / self.g_delta_prefactor ** 2)
+            # Add the inverse prior covariance matrix for each parameter that has a (approximately) Gaussian
+            # prior. We do this by querying the parameter map to find the sub-matrix of u that corresponds
+            # to the parameter, and adding the inverse of its prior covariance matrix.
+            for name, i in pmap.items():
+                p = self.get_parameter(name)
+                prior_precision = self.owner(p).prior_precision(p)
+                if prior_precision is not None:
+                    l = numel(p)
+                    u[i:(i+l), i:(i+l)] += prior_precision
         return u, pmap
 
     def posterior_cov(self, loss,
@@ -1040,230 +1480,6 @@ class VelocityModel(nn.Module):
         u, pmap = self.posterior_cov_inv(loss, params, ignore_priors)
         return inverse(u), pmap
         
-    def G_0(self, x: Tensor) -> Tensor:
-        """
-        Evaluates G_0(x) = int_0^x g(u) du
-
-        g(x) is piece-wise constant and = 1 except on the intervals [g_xranges_l[i], g_xranges_u[i]] where g(x) = g[i].
-
-        :param x:  Locations as a tensor of arbitrary shape
-        :return: G(x,o) as a tensor of the same shape as x
-        """
-        assert all(logical_and(x >= tensor([0]), x <= tensor([self.genome_length])))
-        g, G = self.g_grid_values()
-        idx, offset = self.g_grid_locate(x)
-        return G[idx] + offset * g[idx]
-
-    def g_grid_values(self) -> Tuple[Tensor, Tensor]:
-        """
-        Returns the values of g(x) and G_0(x) on the grid g_xgrid
-
-        :return: Pair (g, G) where g[i] is the value of g(x) on [g_xgrid[i], g_xgrid[i+1]) and G[i] = G_0(g_xgrid[i]).
-        G contains one more element than g, the last element is G_0(L), where L is the length of the genome.
-        """
-        g = cat((dtensor([1.0]), flatten(stack((self.g, ones_like(self.g_delta_scaled)), dim=1))))
-        G = cat((dtensor([0.0]), torch.cumsum(self.g_xgrid_len * g, dim=0)))
-        return g, G
-
-    def g_grid_locate(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        """
-        Locates positions x on the grid g_xgrid
-
-        :param x: Locations as a tensor of arbitrary shape
-        :return: Pair (i, d) of tensors with the same shape as x where i is the index of the grid cell containing x,
-        i.e. g_xgrid[i] <= x < g_xgrid[i+1], and d = x - g_xgrid[i] the offset of x within that cell
-        """
-        with no_grad():
-            idx = grid_index(self.g_xgrid_double, x)
-            return idx, x.double() - self.g_xgrid_double[idx]
-
-    def G_0_inv(self, z: Tensor):
-        """
-        Evaluates G_0^-1(z) for the specified points z
-
-        :param u: Points at which to evaluate G_0^-1
-        :return: G_0^-1(u) at the specified points u
-        """
-
-        assert all(z >= 0)
-        # Values of g(x) and G_0(x) at the grid points g_xgrid
-        # Note: We add an extra point at the end to account for numerical
-        # inaccuracies in z. Other than x, which is an integer tensor, z
-        # is a floating-point tensor!
-        g, Gp = self.g_grid_values()
-        G = cat((Gp, Gp[-1, None]+1), dim=0)
-        assert all(z < G[-1])
-        # Find x_i where G(x_i) <= z but G(x_(i+1)) > z
-        with no_grad():
-            idx = grid_index(G, z)
-            # z = G_0(L) (i.e. the chromosome end) lies in the extra cell added above, map it to the last
-            # real grid cell. This happens for replisomes that reached the end of a linear chromosome.
-            idx = clamp(idx, max=numel(self.g_xgrid) - 1)
-        # Within [z_i, z_(i+1)] the function G is linear, i.e.
-        #   G(t) = G(z_i) + (z - z_i) * g[i]
-        # and its inverse is thus
-        #   G^-1(z) = z_i + (z - G(z_i)) / g[i]
-        return self.g_xgrid[idx] + (z - G[idx]) / g[idx]
-
-    def G(self, x: Tensor, o: Tensor, d: Tensor) -> Tensor:
-        """
-        Evaluates G(x,o) = | int_p g(u) du | for the triples (x, o, d) where p is a path from o to x in direction d.
-
-        g(x) is piece-wise constant and = 1 except on the intervals [g_xranges_l[i], g_xranges_u[i]] where g(x) = g[i].
-
-        :param x:  Genomic locations as a tensor of arbitrary shape
-        :param o: Origins as tensor of the same shape as x
-        :return: G(x,o) as a tensor of the same shape as x
-        """
-        result = (self.G_0(x) - self.G_0(o)) * sign(d)
-        if self.is_circular:
-            wrap = logical_or(logical_and(x < o, d > tensor([0])), logical_and(o < x, d < tensor([0])))
-            result = where(wrap, result + self.G_0(self.genome_length), result)
-        return result
-
-    def g_fun(self, x: Tensor):
-        # Find i where x_grid[i] <= x but x_grid[i+1] > x and return g[i]
-        g, _ = self.g_grid_values()
-        idx, _ = self.g_grid_locate(x)
-        return g[idx]
-
-
-    def surrounding_origins(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        """
-        Returns a pair (l, r) of tensors of the same shape as x containing the closest left and right origin location
-
-        :param x: tensor containing genomic locations
-        :return: pair (l, r) of tensors containg the closest left and right origin location
-        """
-        assert all(logical_and(x >= tensor([0]), x <= tensor([self.genome_length])))
-        # Compute distance between locations x and origins
-        # Note: For origins o_1,o_2,...,o_k on a circular genome of length L,
-        #       origins_augmented contains o_0 = -(L - o_k), o_1, ..., o_k, o_(k+1) = L + o_1
-        dist = x[None,...] - self.origins_augmented[(...,) + (None,) * x.dim()]
-        k = self.origins.size()[0]
-        # Find index of closest origin to the left of each x
-        l_idx = argmin(where(dist >= tensor([0]), dist, tensor([self.int32_max])), dim=0)
-        if self.is_circular:
-            # If the closest origin is o_0, it's actually o_k and the path wraps around the circular genome
-            l_idx = where(l_idx == tensor([0]), tensor([k]), l_idx) - tensor([1])
-        # Find index of closest origin to the right of each x
-        r_idx = argmax(where(dist <= tensor([0]), dist, tensor([self.int32_min])), dim=0)
-        if self.is_circular:
-            # If the closest origin is o_(k+1), it's actually o_1 and the path wraps around the circular genome
-            r_idx = where(r_idx == tensor([k+1]), tensor([1]), r_idx) - tensor([1])
-        # Return origin positions
-        return l_idx, r_idx
-
-    def prepare_input(self, x: Tensor):
-        """ Performs parameter-independent computations on the model input (i.e. tensor containing genomic locations),
-        and returns a `VelocityModel.X` instance that represents the processed input. Passing this to `self.forward()`
-        speeds up the computation.
-
-        :param x: tensor containing genomic locations
-        :return: `VelocityModel.X` instance containing pre-processed input
-        """
-        assert all((x >= tensor([0], dtype=torch.int32)) & (x <= tensor([self.genome_length], dtype=torch.int32)))
-        with no_grad():
-            (i_left, i_right) = self.surrounding_origins(x)
-            o_left, o_right = self.origins[i_left], self.origins[i_right]
-            g_index, g_offset = self.g_grid_locate(x)
-            if self.is_circular:
-                # See G(): the path from o in direction d to x wraps around if x < o for d = +1 or o < x for d = -1
-                wrap_left, wrap_right = x < o_left, o_right < x
-                has_left = has_right = ones_like(x, dtype=torch.bool)
-            else:
-                wrap_left = wrap_right = zeros_like(x, dtype=torch.bool)
-                # surrounding_origins() returns origin index 0 if there is no origin to the left or right
-                has_left, has_right = x >= self.origins[0], x <= self.origins[-1]
-            at_origin = x == o_left
-        return VelocityModel.X(x, i_left, i_right, g_index, g_offset, wrap_left, wrap_right,
-                               has_left, has_right, at_origin)
-
-    def T(self, x: Tensor | X) -> Tensor:
-        """Returns the virtual replication time T(x)
-
-        T(x) = min { H(Delta_l) + int_(o_l)^x g(u)/v0 du, H(Delta_r) + int_x^(o_r) g(u)/v0 du }, which is the virtual
-        time at which the location x, surrounded by origins o_l on the left and o_r on the right is replicated.
-        Delta_l, Delta_r are the (physical) delays with which these origins fire, see Eq. (S1.6). On linear
-        chromosomes, locations left of the first or right of the last origin have only one surrounding origin.
-
-        A location x = o_i that coincides with an origin is its own left and right surrounding origin. Such a
-        location is replicated either when o_i fires, or when the replisome of one of the adjacent origins
-        o_(i-1), o_(i+1) reaches o_i, whichever happens first. Replisomes still stop at the adjacent origin, i.e.
-        locations beyond o_i are never replicated by the replisomes of o_(i-1) respectively o_(i+1).
-
-        :param x: Genomic locations as a tensor of arbitrary shape or as a prepapred input returned by self.prepare_input
-        :return: Virtual replication times as a tensor of the same shape
-        """
-        x_prep = x if isinstance(x, VelocityModel.X) else self.prepare_input(x)
-        delay_virtual = self.temporal.H(self.delay)
-        # Evaluate G(x, o_l, +1) and G(x, o_r, -1), see G(), using the pre-processed input
-        g, G = self.g_grid_values()
-        G_0_x = G[x_prep.g_index] + x_prep.g_offset * g[x_prep.g_index]
-        G_0_origins = self.G_0(self.origins)
-        G_0_L = G[-1]
-        G_left = where(x_prep.wrap_left, G_0_L, 0.0) + (G_0_x - G_0_origins[x_prep.origin_index_left])
-        G_right = where(x_prep.wrap_right, G_0_L, 0.0) - (G_0_x - G_0_origins[x_prep.origin_index_right])
-        t_left = delay_virtual[x_prep.origin_index_left] + G_left / self.temporal.v0
-        t_right = delay_virtual[x_prep.origin_index_right] + G_right / self.temporal.v0
-        # Virtual times at which the replisomes of the adjacent origins o_(i-1) and o_(i+1) reach origin o_i
-        origins_prev, delay_virtual_prev = roll(self.origins, 1), roll(delay_virtual, 1)
-        origins_next, delay_virtual_next = roll(self.origins, -1), roll(delay_virtual, -1)
-        arrival_from_prev = delay_virtual_prev + self.G(self.origins, origins_prev, dtensor([+1.0])) / self.temporal.v0
-        arrival_from_next = delay_virtual_next + self.G(self.origins, origins_next, dtensor([-1.0])) / self.temporal.v0
-        if not self.is_circular:
-            # surrounding_origins() returns origin index 0 if there is no origin to the left or right on a
-            # linear chromosome. Exclude these, otherwise G() is negative and T(x) precedes the origin firing time.
-            t_left = where(x_prep.has_left, t_left, dtensor(float('inf')))
-            t_right = where(x_prep.has_right, t_right, dtensor(float('inf')))
-            # The first origin has no left neighbour and the last origin no right neighbour on a linear chromosome
-            is_first = arange(numel(self.origins)) == 0
-            is_last = arange(numel(self.origins)) == numel(self.origins) - 1
-            arrival_from_prev = where(is_first, dtensor(float('inf')), arrival_from_prev)
-            arrival_from_next = where(is_last, dtensor(float('inf')), arrival_from_next)
-        arrival_from_adjacent = minimum(arrival_from_prev, arrival_from_next)
-        # Locations that coincide with an origin are also replicated by the replisomes of the adjacent origins
-        t = minimum(t_left, t_right)
-        return where(x_prep.at_origin, minimum(t, arrival_from_adjacent[x_prep.origin_index_left]), t)
-
-    def P(self, x: Tensor | X) -> Tensor:
-        """Returns the predicted DNA abundance P(x)
-        :param x: Genomic locations as a tensor of arbitrary shape or as a prepapred input returned by self.prepare_input
-        :return: Predicted DNA abundance
-        """
-        return exp(- self.temporal.growthrate * self.temporal.Hinv(self.T(x)))
-
-    def forward(self, x: Tensor | X):
-        return self.P(x)
-
-    def prior_gdelta(self, hyperparameter_dependence: bool):
-        """The prior log-probability of self.g_delta as a realization of independent Gaussians
-
-        Returns the negative log-probability (or, rather, log-density) of self.g_delta as samples of independent
-        Exponential distribution with mean self.g_delta_prefactor. Since g_delta = g_delta_scaled * g_delta_prefactor, if
-        g_delta follows an exp. dist. with mean self.g_delta_prefactor, g_delta_scaled follows an exp. dist with mean 1.0.
-
-        :param hdependent_only: Whether to return the full density, or only the g_delta-dependent terms
-
-        TODO: Is there really no hyperparameter-dependent term?
-        """
-        return sum(abs(self.g_delta_scaled))
-
-    def prior(self, parameter, hyperparameter_dependence: bool):
-        if parameter is self.delay_scaled:
-            return zeros([])
-        elif parameter is self.g_delta_scaled:
-            return self.prior_gdelta(hyperparameter_dependence=hyperparameter_dependence)
-        else:
-            return self.temporal.prior(parameter, hyperparameter_dependence)
-
-    def sample_prior(self, parameter):
-        if parameter is self.delay_scaled:
-            return torch.distributions.exponential.Exponential(dtensor(1.0)).sample(parameter.shape).squeeze()
-        elif parameter is self.g_delta_scaled:
-            return torch.distributions.exponential.Exponential(dtensor(1.0)).sample(parameter.shape).squeeze()
-        else:
-            return self.temporal.sample_prior(parameter)
 
 class VelocityModelLoss(nn.Module):
     def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel, params: List[nn.Parameter]):

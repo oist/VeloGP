@@ -1,2 +1,2 @@
-from .model import TemporalModel, VelocityModel, VelocityModelLoss, dtensor
+from .model import TemporalModel, ChromosomeModel, VelocityModel, VelocityModelLoss, dtensor
 from .fit import FitVelocityModel

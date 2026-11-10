@@ -20,6 +20,18 @@ class FitVelocityModel:
         self.loss = loss
         self.loss_prefactor = 1.0
 
+    def chromosome_parameters(self, name: str) -> List[Tensor]:
+        """ Returns the parameter (or tensor) with the given name of each chromosome """
+        return [getattr(c, name) for c in self.model.chromosomes]
+
+    def make_chromosome_parameters(self, name: str, zero=False):
+        """ Turns the tensor with the given name of each chromosome into an `nn.Parameter`, optionally zeroing it """
+        for c in self.model.chromosomes:
+            setattr(c, name, nn.Parameter(getattr(c, name)))
+            if zero:
+                with no_grad():
+                    getattr(c, name).zero_()
+
     def parameter_loss_function(self, params: List[nn.Parameter], log_params_default=False, log_loss_default=False):
         """ Returns a function that evaluates the model and optionally logs parameters, loss and gradients """
         def s(update_gradients=True, log_params=log_params_default, log_loss=log_loss_default):
@@ -190,25 +202,29 @@ class FitVelocityModel:
         # use the global relationship A(o) = A_max * exp(- lambda * delta_o)
         # between the abundances A(o) at different. origins o and the firing
         # delay delta_o of those origins to estimate delta_o.
-        n = self.model.origins.size()[0]
+        # NOTE: This assumes that all positions in self.loss.x lie on the same chromosome
+        if len(self.model.chromosomes) != 1:
+            raise RuntimeError("initialize_v0_delays() only supports genomes comprising a single chromosome")
+        chromosome = self.model.chromosomes[0]
+        n = chromosome.origins.size()[0]
         origin_v = dtensor([nan] * n)
         origin_loga0 = dtensor([nan] * n)
         for i in range(0, n):
             try:
-                k, log_a0 = self.local_fit(self.model.origins[i], 200000)
+                k, log_a0 = self.local_fit(chromosome.origins[i], 200000)
             except Exception as e:
                 k = math.nan
                 log_a0 = 0.0
-                print(f"WARNING: local fit around origin {self.model.origin_names[i]} failed")
+                print(f"WARNING: local fit around origin {chromosome.origin_names[i]} failed")
             origin_v[i] = self.model.temporal.growthrate / k
             origin_loga0[i] = log_a0
         with no_grad():
-            self.model.delay = (max(origin_loga0) - origin_loga0) / self.model.temporal.growthrate
+            chromosome.set_delay(self.model.temporal, (max(origin_loga0) - origin_loga0) / self.model.temporal.growthrate)
             if not all(isnan(origin_v)):
                 self.model.temporal.v0 = mean(origin_v[~isnan(origin_v)])
             else:
                 print(f"WARNING: no local fit produced a usable estimate of v0, initial guess set to genome length / doubling time")
-                self.model.temporal.v0 = (self.model.genome_length * self.model.temporal.growthrate) / math.log(2)
+                self.model.temporal.v0 = (chromosome.length * self.model.temporal.growthrate) / math.log(2)
 
     def run_stochastic(self, params: List[nn.Parameter],
                        perturb_rejects=10, perturb_reduce=0.5, perturb_start=1.0, perturb_end=0.01,
@@ -269,22 +285,22 @@ class FitVelocityModel:
                                        log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
         """ Optimize all parameters using gradient-informed stochastic searching """
         self.model.temporal.h_switch_basis("eigenbasis_scaled")
-        self.model.delay_scaled = nn.Parameter(self.model.delay_scaled)
+        self.make_chromosome_parameters("delay_scaled")
         self.model.temporal.v0_log = nn.Parameter(self.model.temporal.v0_log)
         self.model.temporal.h_log_raw = nn.Parameter(self.model.temporal.h_log_raw)
         with no_grad():
             self.model.temporal.h_log_raw.zero_()
-        self.model.g_delta_scaled = nn.Parameter(self.model.g_delta_scaled)
-        with no_grad():
-            self.model.g_delta_scaled.zero_()
+        self.make_chromosome_parameters("g_delta_scaled", zero=True)
+        params = [ self.model.temporal.v0_log, *self.chromosome_parameters("delay_scaled"),
+                   *self.chromosome_parameters("g_delta_scaled"), self.model.temporal.h_log_raw ]
         if log_phases:
             print("Stochastic optimization of v0, delays, h(t) and g(x)")
         self.run_stochastic(perturb_rejects=perturb_rejects, perturb_reduce=perturb_reduce, perturb_start=1.0, perturb_end=perturb_end,
-                            params=[ self.model.temporal.v0_log, self.model.delay_scaled, self.model.g_delta_scaled, self.model.temporal.h_log_raw ],
+                            params=params,
                             log_rounds=log_rounds, log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         if log_phases:
             print("Finalizing v0, g() and h() until the object cannot be further improved")
-        self.run_lbfgs([ self.model.temporal.v0_log, self.model.delay_scaled, self.model.g_delta_scaled, self.model.temporal.h_log_raw ],
+        self.run_lbfgs(params,
                        lr_start=1.0, lr_end=1.0, iterations=100, steps=None, retry=30,
                        tolerance=1e-6, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
@@ -298,8 +314,9 @@ class FitVelocityModel:
         self.initialize_v0_delays()
         if log_phases:
             print(f"  v0: {self.model.temporal.v0:.0f} bp/s")
-            for i, n in enumerate(self.model.origin_names):
-                print(f"  {n}: {self.model.delay[i].item():.0f} s")
+            for c in self.model.chromosomes:
+                for n, d in zip(c.origin_names, c.delay(self.model.temporal)):
+                    print(f"  {n}: {d.item():.0f} s")
         # II. Optimize g()
         # We first optimize v0 and the spatial delays since these are easier to fit.
         # We start with a small learning rate because L-BGFS is otherwise prone to making
@@ -312,8 +329,8 @@ class FitVelocityModel:
         if log_phases:
             print("Optimizing v0 and g()")
         self.model.temporal.v0_log = nn.Parameter(self.model.temporal.v0_log)
-        self.model.g_delta_scaled = nn.Parameter(self.model.g_delta_scaled)
-        self.run_lbfgs([self.model.temporal.v0_log, self.model.g_delta_scaled],
+        self.make_chromosome_parameters("g_delta_scaled")
+        self.run_lbfgs([self.model.temporal.v0_log, *self.chromosome_parameters("g_delta_scaled")],
                        lr_start=0.1, lr_end=1.0, iterations=100, steps=10,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
@@ -345,13 +362,13 @@ class FitVelocityModel:
         # Note that for lack of a good test, we currently don't check for convergence...
         if log_phases:
             print("Optimizing v0, g() and h() simultaneously")
-        self.run_lbfgs([ self.model.temporal.v0_log, self.model.g_delta_scaled, self.model.temporal.h_log_raw ],
+        self.run_lbfgs([ self.model.temporal.v0_log, *self.chromosome_parameters("g_delta_scaled"), self.model.temporal.h_log_raw ],
                        lr_start=0.1, lr_end=1.0, iterations=1000, steps=10,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         if log_phases:
             print("Finalizing v0, g() and h() until the object cannot be further improved")
-        self.run_lbfgs([ self.model.temporal.v0_log, self.model.g_delta_scaled, self.model.temporal.h_log_raw ],
+        self.run_lbfgs([ self.model.temporal.v0_log, *self.chromosome_parameters("g_delta_scaled"), self.model.temporal.h_log_raw ],
                        lr_start=1.0, lr_end=1.0, iterations=100, steps=None, retry=30,
                        tolerance=1e-6, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)

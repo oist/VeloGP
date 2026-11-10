@@ -325,8 +325,8 @@ if ARGS.seed is not None:
 
 # Create model
 DOUBLINGTIME = 3600 * math.log(2) / ARGS.growthrate
-MODEL = model.VelocityModel(
-    genome_length=CHROMOSOME_LENGTHS[SINGLE_CHROMOSOME], is_circular=True,
+MODEL = model.VelocityModel.single_chromosome(
+    name=SINGLE_CHROMOSOME, genome_length=CHROMOSOME_LENGTHS[SINGLE_CHROMOSOME], is_circular=True,
     origins=pt.tensor([o.pos for o in ORIGINS if o.chr == SINGLE_CHROMOSOME], dtype=pt.int32),
     origin_names=[o.name for o in ORIGINS if o.chr == SINGLE_CHROMOSOME],
     h_tgrid=pt.arange(start=0, end=DOUBLINGTIME * ARGS.vt_tmax,
@@ -337,6 +337,7 @@ MODEL = model.VelocityModel(
     g_delayscale=pt.tensor([f.delayscale for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.float64),
     v0_min=model.dtensor(ARGS.v0_min), v0_max=model.dtensor(ARGS.v0_max)
 )
+CHROMOSOME = MODEL.chromosomes[0]
 MODEL.temporal.growthrate[0] = ARGS.growthrate / 3600
 MODEL.temporal.h_cov_function = ARGS.vt_covariance
 MODEL.temporal.h_sigma[0] = ARGS.vt_magnitude
@@ -348,7 +349,7 @@ LOSS = model.VelocityModelLoss(
     y_obs=pt.tensor(ABUNDANCE["y_obs"].values, dtype=pt.float64),
     s_obs=pt.tensor(ABUNDANCE["s_obs"].values, dtype=pt.float64),
     model=MODEL,
-    params=["temporal.v0_log", "delay_scaled", "temporal.h_log_raw", "g_delta_scaled"])
+    params=["temporal.v0_log", "chromosomes.0.delay_scaled", "temporal.h_log_raw", "chromosomes.0.g_delta_scaled"])
 
 # Create fit instance
 ALG = fit.FitVelocityModel(MODEL, LOSS)
@@ -396,7 +397,7 @@ ALG.optimize_parameters_stochastic(perturb_reduce=ARGS.perturbation_reduction,
 # Compute posterior covariances of parameters
 print("*** COMPUTING POSTERIOR DISTRIBUTIONS")
 COV_V0, COV_V0_PMAP = MODEL.posterior_cov(LOSS, ["temporal.v0_log"])
-COV_HG, COV_HG_PMAP = MODEL.posterior_cov(LOSS, ["temporal.h_log_raw", "g_delta_scaled"])
+COV_HG, COV_HG_PMAP = MODEL.posterior_cov(LOSS, ["temporal.h_log_raw", "chromosomes.0.g_delta_scaled"])
 
 # Save results
 print("*** SAVING RESULTS")
@@ -482,7 +483,7 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
     f = None
     try:
         # Check that we agree on the order of the genomic features...
-        assert all(MODEL.g_xranges_l == pt.tensor(list([f.begin for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME]), dtype=pt.int32))
+        assert all(CHROMOSOME.g_xranges_l == pt.tensor(list([f.begin for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME]), dtype=pt.int32))
         # Build table
         chr_slen = max([len("chr")] + [ len(f.chr) for f in VX_FEATURES ])
         fn_slen = max([len("feature")] + [ len(f.name) for f in VX_FEATURES ])
@@ -490,7 +491,7 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
                  ('name', f'U{fn_slen}'), ('delayscale', np.float64),
                  ('g', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64) ]
         fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f')
-        tab = np.zeros(MODEL.g_delta.shape[0], dtype=cols)
+        tab = np.zeros(CHROMOSOME.g_delta.shape[0], dtype=cols)
         features = list([f for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME])
         tab["chr"] = [f.chr for f in features ]
         tab["begin"] = [f.begin for f in features ]
@@ -498,9 +499,9 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         tab["length"] = [f.end - f.begin for f in features ]
         tab["name"] = [f.name for f in features ]
         tab["delayscale"] = [f.delayscale for f in features ]
-        tab["g"] = MODEL.g.detach().numpy()
-        tab["delay_bp"] = MODEL.g_delta.detach().numpy() * MODEL.g_xranges_len.detach().numpy()
-        tab["delay_rel"] = tab["delay_bp"] / MODEL.genome_length_virtual.detach().numpy()
+        tab["g"] = CHROMOSOME.g.detach().numpy()
+        tab["delay_bp"] = CHROMOSOME.g_delta.detach().numpy() * CHROMOSOME.g_xranges_len.detach().numpy()
+        tab["delay_rel"] = tab["delay_bp"] / CHROMOSOME.length_virtual.detach().numpy()
         # Write tab-separated to output file
         f = open_file(ARGS.out_vx_feature_delays, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
@@ -546,7 +547,7 @@ if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
                 tab[f"x.{o.name}{d}"] =  tab_x[:, r_i].detach().numpy()
                 tab[f"dx.{o.name}{d}"] =  tab_dx[:, r_i].detach().numpy()
                 tab[f"v.{o.name}{d}"] = tab_v[:, r_i].detach().numpy()
-                tab[f"gx.{o.name}{d}"] = MODEL.g_fun(tab_x[:, r_i]).detach().numpy()
+                tab[f"gx.{o.name}{d}"] = CHROMOSOME.g_fun(tab_x[:, r_i]).detach().numpy()
         # Write tab-separated to output file
         f = open_file(ARGS.out_trajectories, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")

@@ -33,7 +33,7 @@ import pytest
 import torch
 from torch import nn
 
-from velogp import VelocityModel, dtensor
+from velogp import ChromosomeModel, TemporalModel, VelocityModel, dtensor
 
 
 @dataclass
@@ -60,9 +60,31 @@ class Scenario:
         return self.delay if self.delay is not None else [0.0] * len(self.origins)
 
 
+def set_parameters(s: Scenario, temporal: TemporalModel, chromosome: ChromosomeModel):
+    """ Sets the parameters of the scenario through the public setters """
+    with torch.no_grad():
+        temporal.v0 = dtensor(s.v0)
+        # TemporalModel has no h_log setter; in the (default) canonical basis h_log_raw = log h(h_tgrid)
+        assert temporal.h_basis == "canonical"
+        temporal.h_log_raw = torch.log(dtensor(s.h_values))
+        chromosome.g_delta = dtensor(s.g_delta)
+        chromosome.set_delay(temporal, dtensor(s.delays))
+
+
+def make_chromosome(s: Scenario, name: str) -> ChromosomeModel:
+    """ Creates a ChromosomeModel for the given scenario """
+    return ChromosomeModel(
+        name, s.genome_length, s.is_circular,
+        origins=torch.tensor(s.origins, dtype=torch.int32),
+        origin_names=[f"{name}.ori{i}" for i in range(len(s.origins))],
+        g_xranges_l=torch.tensor(s.g_xranges_l, dtype=torch.int32),
+        g_xranges_u=torch.tensor(s.g_xranges_u, dtype=torch.int32),
+        g_delayscale=dtensor(s.g_delayscale) if s.g_delayscale is not None else None)
+
+
 def make_model(s: Scenario) -> VelocityModel:
-    """ Creates a VelocityModel for the given scenario, setting parameters through the public setters """
-    m = VelocityModel(
+    """ Creates a single-chromosome VelocityModel for the given scenario """
+    m = VelocityModel.single_chromosome(
         genome_length=s.genome_length, is_circular=s.is_circular,
         origins=torch.tensor(s.origins, dtype=torch.int32),
         origin_names=[f"ori{i}" for i in range(len(s.origins))],
@@ -71,13 +93,7 @@ def make_model(s: Scenario) -> VelocityModel:
         g_xranges_u=torch.tensor(s.g_xranges_u, dtype=torch.int32),
         v0_min=dtensor([1.0]), v0_max=dtensor([1000.0]),
         g_delayscale=dtensor(s.g_delayscale) if s.g_delayscale is not None else None)
-    with torch.no_grad():
-        m.temporal.v0 = dtensor(s.v0)
-        # VelocityModel has no h_log setter; in the (default) canonical basis h_log_raw = log h(h_tgrid)
-        assert m.temporal.h_basis == "canonical"
-        m.temporal.h_log_raw = torch.log(dtensor(s.h_values))
-        m.g_delta = dtensor(s.g_delta)
-        m.delay = dtensor(s.delays)
+    set_parameters(s, m.temporal, m.chromosomes[0])
     return m
 
 
@@ -234,15 +250,148 @@ def test_reference_detects_differences(change: dict):
         assert_profile_matches_reference(BASE_SCENARIO, make_model(other))
 
 
-def test_temporal_attributes_cannot_be_assigned_on_velocity_model():
-    """ Assigning e.g. `h_log_raw` on the VelocityModel instead of its TemporalModel must fail loudly """
+def test_submodel_attributes_cannot_be_assigned_on_velocity_model():
+    """ Assigning e.g. `h_log_raw` or `g_delta` on the VelocityModel instead of a sub-model must fail loudly """
     m = make_model(BASE_SCENARIO)
-    for name, value in [("h_log_raw", torch.zeros_like(m.temporal.h_log_raw)),
-                        ("v0_log", nn.Parameter(m.temporal.v0_log.clone())),
-                        ("growthrate", dtensor([1.0]))]:
-        with pytest.raises((AttributeError, KeyError), match="temporal"):
+    c = m.chromosomes[0]
+    for name, value, owner in [("h_log_raw", torch.zeros_like(m.temporal.h_log_raw), "temporal"),
+                               ("v0_log", nn.Parameter(m.temporal.v0_log.clone()), "temporal"),
+                               ("growthrate", dtensor([1.0]), "temporal"),
+                               ("delay_scaled", nn.Parameter(c.delay_scaled.clone()), "chromosome"),
+                               ("g_delta", c.g_delta.clone(), "chromosome"),
+                               ("origins", c.origins.clone(), "chromosome")]:
+        with pytest.raises(AttributeError, match=owner):
             setattr(m, name, value)
-    # Attributes owned by VelocityModel itself, and nn.Module internals, can still be assigned
-    m.delay_scaled = nn.Parameter(m.delay_scaled)
+    # Parameters of the sub-models are found under their qualified names, and nn.Module internals can still be
+    # assigned
+    c.delay_scaled = nn.Parameter(c.delay_scaled)
+    m.temporal.v0_log = nn.Parameter(m.temporal.v0_log)
     m.train(False)
-    assert [n for n, _ in m.named_parameters()] == ["delay_scaled"]
+    assert [n for n, _ in m.named_parameters()] == ["temporal.v0_log", "chromosomes.0.delay_scaled"]
+
+
+# Two chromosomes with different structure and parameters, but the same v(t). Chromosome names may contain dots.
+GENOME_SCENARIOS = {
+    "U00096.3": next(s for s in SCENARIOS if s.name == "circular, all combined"),
+    "plasmid.1": next(s for s in SCENARIOS if s.name == "linear, all combined"),
+}
+
+
+def make_genome_model() -> VelocityModel:
+    """ Creates a VelocityModel comprising the chromosomes in GENOME_SCENARIOS """
+    scenarios = list(GENOME_SCENARIOS.values())
+    assert all((s.v0, s.h_tgrid, s.h_values) == (scenarios[0].v0, scenarios[0].h_tgrid, scenarios[0].h_values)
+               for s in scenarios)
+    temporal = TemporalModel(dtensor(scenarios[0].h_tgrid), v0_min=dtensor([1.0]), v0_max=dtensor([1000.0]))
+    chromosomes = [make_chromosome(s, name) for name, s in GENOME_SCENARIOS.items()]
+    for s, c in zip(scenarios, chromosomes):
+        set_parameters(s, temporal, c)
+    return VelocityModel(temporal, chromosomes)
+
+
+def genome_positions() -> tuple[torch.Tensor, torch.Tensor]:
+    """ Positions on all chromosomes of GENOME_SCENARIOS in a random order, and the chromosome index of each """
+    x = torch.cat([model_positions(s) for s in GENOME_SCENARIOS.values()])
+    c = torch.cat([torch.full((len(model_positions(s)),), i) for i, s in enumerate(GENOME_SCENARIOS.values())])
+    perm = torch.randperm(len(x), generator=torch.Generator().manual_seed(0))
+    return x[perm], c[perm]
+
+
+def test_multi_chromosome_matches_single_chromosome_models():
+    """ Each chromosome of a multi-chromosome model must produce the same profile as a single-chromosome model """
+    m = make_genome_model()
+    x, c = genome_positions()
+    with torch.no_grad():
+        p = m.forward(m.prepare_input(x, c))
+        for i, s in enumerate(GENOME_SCENARIOS.values()):
+            torch.testing.assert_close(p[c == i], make_model(s).forward(x[c == i]), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("name", GENOME_SCENARIOS.keys())
+def test_multi_chromosome_matches_reference(name: str):
+    """ Positions given by chromosome name must match the Euler reference of that chromosome """
+    m = make_genome_model()
+    s = GENOME_SCENARIOS[name]
+    x = model_positions(s)
+    with torch.no_grad():
+        p_model = m.forward(m.prepare_input(x, name))
+    single = make_model(s)
+    with torch.no_grad():
+        torch.testing.assert_close(p_model, single.forward(x), rtol=0, atol=0)
+    assert_profile_matches_reference(s, single)
+
+
+def test_multi_chromosome_input_forms():
+    """ Chromosomes can be given as names, indices or index tensors, and inputs can have arbitrary shape """
+    m = make_genome_model()
+    names = list(GENOME_SCENARIOS.keys())
+    x, c = genome_positions()
+    x, c = x[:120], c[:120]
+    with torch.no_grad():
+        p = m.forward(m.prepare_input(x, c))
+        torch.testing.assert_close(m.forward(m.prepare_input(x, [names[i] for i in c.tolist()])), p, rtol=0, atol=0)
+        torch.testing.assert_close(m.forward(m.prepare_input(x, c.tolist())), p, rtol=0, atol=0)
+        p2 = m.forward(m.prepare_input(x.reshape(12, 10), c.reshape(12, 10)))
+        torch.testing.assert_close(p2, p.reshape(12, 10), rtol=0, atol=0)
+    with pytest.raises(ValueError):
+        m.prepare_input(x)
+    with pytest.raises(KeyError):
+        m.prepare_input(x, "no such chromosome")
+
+
+@pytest.mark.parametrize("k", [5, slice(10, 50, 3), torch.tensor([7, 3, 3, 90, 0])], ids=["int", "slice", "tensor"])
+def test_multi_chromosome_prepared_input_subsets(k):
+    """ Indexing prepared input must select the corresponding positions, as used by VelocityModelLoss.jacobian() """
+    m = make_genome_model()
+    x, c = genome_positions()
+    x, c = x[:120], c[:120]
+    x_prep = m.prepare_input(x, c)
+    with torch.no_grad():
+        expected = m.forward(x_prep)[k]
+        # NOTE: For a single (0-d) position, P() returns a 1-element tensor since growthrate has shape (1,)
+        torch.testing.assert_close(m.forward(x_prep[k]).reshape(expected.shape), expected, rtol=0, atol=0)
+        torch.testing.assert_close(m.forward(x_prep[k]), m.forward(m.prepare_input(x[k], c[k])), rtol=0, atol=0)
+
+
+def test_clamp_shifts_delays_genome_wide():
+    """ Delays are relative to the first origin to fire in the whole genome, not on each chromosome """
+    m = make_genome_model()
+    c0, c1 = m.chromosomes
+    with torch.no_grad():
+        c0.delay_scaled.copy_(dtensor([5.0, 7.0, 6.0, 9.0]))
+        c1.delay_scaled.copy_(dtensor([3.0, 4.0, -1.0, 8.0]))
+    m.clamp_parameters()
+    torch.testing.assert_close(c0.delay_scaled, dtensor([5.0, 7.0, 6.0, 9.0]))
+    torch.testing.assert_close(c1.delay_scaled, dtensor([3.0, 4.0, 0.0, 8.0]))
+    with torch.no_grad():
+        c1.delay_scaled.copy_(dtensor([3.0, 4.0, 2.0, 8.0]))
+    m.clamp_parameters()
+    torch.testing.assert_close(c0.delay_scaled, dtensor([3.0, 5.0, 4.0, 7.0]))
+    torch.testing.assert_close(c1.delay_scaled, dtensor([1.0, 2.0, 0.0, 6.0]))
+
+
+def test_prior_dispatch():
+    """ Priors of each parameter are provided by the sub-model the parameter belongs to """
+    m = make_genome_model()
+    c0, c1 = m.chromosomes
+    with torch.no_grad():
+        c0.g_delta_scaled.copy_(dtensor([1.0] * c0.g_delta_scaled.numel()))
+        c1.g_delta_scaled.copy_(dtensor([2.0] * c1.g_delta_scaled.numel()))
+    assert m.owner(m.temporal.h_log_raw) is m.temporal
+    assert m.owner(c1.delay_scaled) is c1
+    assert m.prior(c0.g_delta_scaled, False).item() == c0.g_delta_scaled.numel()
+    assert m.prior(c1.g_delta_scaled, False).item() == 2 * c1.g_delta_scaled.numel()
+    assert m.prior(c1.delay_scaled, False).item() == 0.0
+    torch.testing.assert_close(m.prior(m.temporal.h_log_raw, True), m.temporal.prior_hlog(True))
+    with pytest.raises(RuntimeError):
+        m.owner(torch.zeros(1))
+
+
+def test_trajectories_concatenate_chromosomes():
+    m = make_genome_model()
+    t = m.temporal.h_tgrid
+    with torch.no_grad():
+        combined = m.trajectories(t)
+        separate = [c.trajectories(m.temporal, t) for c in m.chromosomes]
+    for i, tab in enumerate(combined):
+        torch.testing.assert_close(tab, torch.cat([s[i] for s in separate], dim=-1), rtol=0, atol=0, equal_nan=True)
