@@ -54,10 +54,28 @@ class VelocityModel(nn.Module):
 
     @dataclass
     class X:
-        """ Represents a set of genomic positions, pre-processes for faster model evaluation """
+        """
+        Represents a set of genomic positions, pre-processed for faster model evaluation
+
+        All fields only depend on the positions and on the fixed model structure (genome length, circularity,
+        origins, g_xranges), never on fitted parameters, and all have the same shape as x.
+        """
         x: Tensor
+        # Indices of the closest origin to the left and right, see `VelocityModel.surrounding_origins()`
         origin_index_left: Tensor
         origin_index_right: Tensor
+        # Index i of the cell of g_xgrid containing x, and the offset x - g_xgrid[i]
+        g_index: Tensor
+        g_offset: Tensor
+        # Whether the path from the left origin (in direction +1) respectively the right origin (in direction -1)
+        # to x wraps around the end of a circular genome
+        wrap_left: Tensor
+        wrap_right: Tensor
+        # Whether x actually has an origin to its left respectively right (always true on circular genomes)
+        has_left: Tensor
+        has_right: Tensor
+        # Whether x coincides with an origin
+        at_origin: Tensor
 
     def __init__(self, genome_length: int, is_circular: bool,
                  origins: IntTensor, origin_names: list[str],
@@ -697,6 +715,33 @@ class VelocityModel(nn.Module):
         # G(x[j]) = sum_i g[i] * c[i,j]
         return sum(c * g[(...,) + (None,) * x.dim()], dim=0)
 
+    def g_grid_values(self) -> Tuple[Tensor, Tensor]:
+        """
+        Returns the values of g(x) and G_0(x) on the grid g_xgrid
+
+        :return: Pair (g, G) where g[i] is the value of g(x) on [g_xgrid[i], g_xgrid[i+1]) and G[i] = G_0(g_xgrid[i]).
+        G contains one more element than g, the last element is G_0(L), where L is the length of the genome.
+        """
+        g = cat((dtensor([1.0]), flatten(stack((self.g, ones_like(self.g_delta_scaled)), dim=1))))
+        G = cat((dtensor([0.0]), torch.cumsum(self.g_xgrid_len * g, dim=0)))
+        return g, G
+
+    def g_grid_locate(self, x: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Locates positions x on the grid g_xgrid
+
+        :param x: Locations as a tensor of arbitrary shape
+        :return: Pair (i, d) of tensors with the same shape as x where i is the index of the grid cell containing x,
+        i.e. g_xgrid[i] <= x < g_xgrid[i+1], and d = x - g_xgrid[i] the offset of x within that cell
+        """
+        # NOTE: We append +inf to g_xgrid, since that guarantees that the lookup below always finds
+        #       at least one grid cell where x < g_xgrid.
+        g_xgrid_augmented = cat((self.g_xgrid.double(), dtensor([float('inf')])))
+        with no_grad():
+            lt = x[None, ...] < g_xgrid_augmented[(...,) + (None,) * x.dim()]
+            idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
+            return idx, x.double() - self.g_xgrid[idx]
+
     def G_0_inv(self, z: Tensor):
         """
         Evaluates G_0^-1(z) for the specified points z
@@ -792,7 +837,19 @@ class VelocityModel(nn.Module):
         assert all((x >= tensor([0], dtype=torch.int32)) & (x <= tensor([self.genome_length], dtype=torch.int32)))
         with no_grad():
             (i_left, i_right) = self.surrounding_origins(x)
-        return VelocityModel.X(x, i_left, i_right)
+            o_left, o_right = self.origins[i_left], self.origins[i_right]
+            g_index, g_offset = self.g_grid_locate(x)
+            if self.is_circular:
+                # See G(): the path from o in direction d to x wraps around if x < o for d = +1 or o < x for d = -1
+                wrap_left, wrap_right = x < o_left, o_right < x
+                has_left = has_right = ones_like(x, dtype=torch.bool)
+            else:
+                wrap_left = wrap_right = zeros_like(x, dtype=torch.bool)
+                # surrounding_origins() returns origin index 0 if there is no origin to the left or right
+                has_left, has_right = x >= self.origins[0], x <= self.origins[-1]
+            at_origin = x == o_left
+        return VelocityModel.X(x, i_left, i_right, g_index, g_offset, wrap_left, wrap_right,
+                               has_left, has_right, at_origin)
 
     def T(self, x: Tensor | X) -> Tensor:
         """Returns the virtual replication time T(x)
@@ -812,8 +869,15 @@ class VelocityModel(nn.Module):
         """
         x_prep = x if isinstance(x, VelocityModel.X) else self.prepare_input(x)
         delay_virtual = self.H(self.delay)
-        t_left = delay_virtual[x_prep.origin_index_left] + self.G(x_prep.x, self.origins[x_prep.origin_index_left], dtensor([+1.0])) / self.v0
-        t_right = delay_virtual[x_prep.origin_index_right] + self.G(x_prep.x, self.origins[x_prep.origin_index_right], dtensor([-1.0])) / self.v0
+        # Evaluate G(x, o_l, +1) and G(x, o_r, -1), see G(), using the pre-processed input
+        g, G = self.g_grid_values()
+        G_0_x = G[x_prep.g_index] + x_prep.g_offset * g[x_prep.g_index]
+        G_0_origins = self.G_0(self.origins)
+        G_0_L = G[-1]
+        G_left = where(x_prep.wrap_left, G_0_L, 0.0) + (G_0_x - G_0_origins[x_prep.origin_index_left])
+        G_right = where(x_prep.wrap_right, G_0_L, 0.0) - (G_0_x - G_0_origins[x_prep.origin_index_right])
+        t_left = delay_virtual[x_prep.origin_index_left] + G_left / self.v0
+        t_right = delay_virtual[x_prep.origin_index_right] + G_right / self.v0
         # Virtual times at which the replisomes of the adjacent origins o_(i-1) and o_(i+1) reach origin o_i
         origins_prev, delay_virtual_prev = roll(self.origins, 1), roll(delay_virtual, 1)
         origins_next, delay_virtual_next = roll(self.origins, -1), roll(delay_virtual, -1)
@@ -822,8 +886,8 @@ class VelocityModel(nn.Module):
         if not self.is_circular:
             # surrounding_origins() returns origin index 0 if there is no origin to the left or right on a
             # linear chromosome. Exclude these, otherwise G() is negative and T(x) precedes the origin firing time.
-            t_left = where(x_prep.x >= self.origins[0], t_left, dtensor(float('inf')))
-            t_right = where(x_prep.x <= self.origins[-1], t_right, dtensor(float('inf')))
+            t_left = where(x_prep.has_left, t_left, dtensor(float('inf')))
+            t_right = where(x_prep.has_right, t_right, dtensor(float('inf')))
             # The first origin has no left neighbour and the last origin no right neighbour on a linear chromosome
             is_first = arange(numel(self.origins)) == 0
             is_last = arange(numel(self.origins)) == numel(self.origins) - 1
@@ -831,9 +895,8 @@ class VelocityModel(nn.Module):
             arrival_from_next = where(is_last, dtensor(float('inf')), arrival_from_next)
         arrival_from_adjacent = minimum(arrival_from_prev, arrival_from_next)
         # Locations that coincide with an origin are also replicated by the replisomes of the adjacent origins
-        at_origin = x_prep.x == self.origins[x_prep.origin_index_left]
         t = minimum(t_left, t_right)
-        return where(at_origin, minimum(t, arrival_from_adjacent[x_prep.origin_index_left]), t)
+        return where(x_prep.at_origin, minimum(t, arrival_from_adjacent[x_prep.origin_index_left]), t)
 
     def P(self, x: Tensor | X) -> Tensor:
         """Returns the predicted DNA abundance P(x)
