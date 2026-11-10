@@ -174,15 +174,15 @@ class FitVelocityModel:
     
     def run_newton(self, lr: float=0.1, iterations: int=10):
         """ Do Newton step. Currently unused, possibly incorrect """
-#        basis = self.model.h_basis
-#        self.model.h_switch_basis("canonical")
-        p = [self.model.h_log_raw]
+#        basis = self.model.temporal.h_basis
+#        self.model.temporal.h_switch_basis("canonical")
+        p = [self.model.temporal.h_log_raw]
         for i in range(iterations):
             u = self.loss.newton_step(p)
             with no_grad():
                 self.model.pvector_assign(p, self.model.pvector(p)*(1-lr) + u*lr)            
                 self.model.clamp_parameters()
-#        self.model.h_switch_basis(basis)
+#        self.model.temporal.h_switch_basis(basis)
 
     def initialize_v0_delays(self):
         """ Estimate v0 and origin delays by fitting local models at each origin. Currently unused """
@@ -200,15 +200,15 @@ class FitVelocityModel:
                 k = math.nan
                 log_a0 = 0.0
                 print(f"WARNING: local fit around origin {self.model.origin_names[i]} failed")
-            origin_v[i] = self.model.growthrate / k
+            origin_v[i] = self.model.temporal.growthrate / k
             origin_loga0[i] = log_a0
         with no_grad():
-            self.model.delay = (max(origin_loga0) - origin_loga0) / self.model.growthrate
+            self.model.delay = (max(origin_loga0) - origin_loga0) / self.model.temporal.growthrate
             if not all(isnan(origin_v)):
-                self.model.v0 = mean(origin_v[~isnan(origin_v)])
+                self.model.temporal.v0 = mean(origin_v[~isnan(origin_v)])
             else:
                 print(f"WARNING: no local fit produced a usable estimate of v0, initial guess set to genome length / doubling time")
-                self.model.v0 = (self.model.genome_length * self.model.growthrate) / math.log(2)
+                self.model.temporal.v0 = (self.model.genome_length * self.model.temporal.growthrate) / math.log(2)
 
     def run_stochastic(self, params: List[nn.Parameter],
                        perturb_rejects=10, perturb_reduce=0.5, perturb_start=1.0, perturb_end=0.01,
@@ -268,23 +268,23 @@ class FitVelocityModel:
     def optimize_parameters_stochastic(self, perturb_rejects: int = 10, perturb_reduce: float = 0.5, perturb_end: float = 0.01,
                                        log_phases=False, log_rounds=False, log_steps=False, log_iterations=False, log_params=False):
         """ Optimize all parameters using gradient-informed stochastic searching """
-        self.model.h_switch_basis("eigenbasis_scaled")
+        self.model.temporal.h_switch_basis("eigenbasis_scaled")
         self.model.delay_scaled = nn.Parameter(self.model.delay_scaled)
-        self.model.v0_log = nn.Parameter(self.model.v0_log)
-        self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
+        self.model.temporal.v0_log = nn.Parameter(self.model.temporal.v0_log)
+        self.model.temporal.h_log_raw = nn.Parameter(self.model.temporal.h_log_raw)
         with no_grad():
-            self.model.h_log_raw.zero_()
+            self.model.temporal.h_log_raw.zero_()
         self.model.g_delta_scaled = nn.Parameter(self.model.g_delta_scaled)
         with no_grad():
             self.model.g_delta_scaled.zero_()
         if log_phases:
             print("Stochastic optimization of v0, delays, h(t) and g(x)")
         self.run_stochastic(perturb_rejects=perturb_rejects, perturb_reduce=perturb_reduce, perturb_start=1.0, perturb_end=perturb_end,
-                            params=[ self.model.v0_log, self.model.delay_scaled, self.model.g_delta_scaled, self.model.h_log_raw ],
+                            params=[ self.model.temporal.v0_log, self.model.delay_scaled, self.model.g_delta_scaled, self.model.temporal.h_log_raw ],
                             log_rounds=log_rounds, log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         if log_phases:
             print("Finalizing v0, g() and h() until the object cannot be further improved")
-        self.run_lbfgs([ self.model.v0_log, self.model.delay_scaled, self.model.g_delta_scaled, self.model.h_log_raw ],
+        self.run_lbfgs([ self.model.temporal.v0_log, self.model.delay_scaled, self.model.g_delta_scaled, self.model.temporal.h_log_raw ],
                        lr_start=1.0, lr_end=1.0, iterations=100, steps=None, retry=30,
                        tolerance=1e-6, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
@@ -297,7 +297,7 @@ class FitVelocityModel:
             print("Determining initial estimates for v0 and delay")
         self.initialize_v0_delays()
         if log_phases:
-            print(f"  v0: {self.model.v0:.0f} bp/s")
+            print(f"  v0: {self.model.temporal.v0:.0f} bp/s")
             for i, n in enumerate(self.model.origin_names):
                 print(f"  {n}: {self.model.delay[i].item():.0f} s")
         # II. Optimize g()
@@ -311,9 +311,9 @@ class FitVelocityModel:
         # starting point for the next step.
         if log_phases:
             print("Optimizing v0 and g()")
-        self.model.v0_log = nn.Parameter(self.model.v0_log)
+        self.model.temporal.v0_log = nn.Parameter(self.model.temporal.v0_log)
         self.model.g_delta_scaled = nn.Parameter(self.model.g_delta_scaled)
-        self.run_lbfgs([self.model.v0_log, self.model.g_delta_scaled],
+        self.run_lbfgs([self.model.temporal.v0_log, self.model.g_delta_scaled],
                        lr_start=0.1, lr_end=1.0, iterations=100, steps=10,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
@@ -332,9 +332,9 @@ class FitVelocityModel:
         # final step.
         if log_phases:
             print("Optimizing h()")
-        self.model.h_switch_basis("eigenbasis_scaled")
-        self.model.h_log_raw = nn.Parameter(self.model.h_log_raw)
-        self.run_lbfgs([ self.model.v0_log, self.model.h_log_raw ],
+        self.model.temporal.h_switch_basis("eigenbasis_scaled")
+        self.model.temporal.h_log_raw = nn.Parameter(self.model.temporal.h_log_raw)
+        self.run_lbfgs([ self.model.temporal.v0_log, self.model.temporal.h_log_raw ],
                        lr_start=0.1, lr_end=1.0, iterations=100, steps=10,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
@@ -345,13 +345,13 @@ class FitVelocityModel:
         # Note that for lack of a good test, we currently don't check for convergence...
         if log_phases:
             print("Optimizing v0, g() and h() simultaneously")
-        self.run_lbfgs([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
+        self.run_lbfgs([ self.model.temporal.v0_log, self.model.g_delta_scaled, self.model.temporal.h_log_raw ],
                        lr_start=0.1, lr_end=1.0, iterations=1000, steps=10,
                        tolerance_change=-math.inf, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)
         if log_phases:
             print("Finalizing v0, g() and h() until the object cannot be further improved")
-        self.run_lbfgs([ self.model.v0_log, self.model.g_delta_scaled, self.model.h_log_raw ],
+        self.run_lbfgs([ self.model.temporal.v0_log, self.model.g_delta_scaled, self.model.temporal.h_log_raw ],
                        lr_start=1.0, lr_end=1.0, iterations=100, steps=None, retry=30,
                        tolerance=1e-6, line_search_fn="strong_wolfe",
                        log_steps=log_steps, log_iterations=log_iterations, log_params=log_params)

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pytest
 import torch
+from torch import nn
 
 from velogp import VelocityModel, dtensor
 
@@ -71,10 +72,10 @@ def make_model(s: Scenario) -> VelocityModel:
         v0_min=dtensor([1.0]), v0_max=dtensor([1000.0]),
         g_delayscale=dtensor(s.g_delayscale) if s.g_delayscale is not None else None)
     with torch.no_grad():
-        m.v0 = dtensor(s.v0)
+        m.temporal.v0 = dtensor(s.v0)
         # VelocityModel has no h_log setter; in the (default) canonical basis h_log_raw = log h(h_tgrid)
-        assert m.h_basis == "canonical"
-        m.h_log_raw = torch.log(dtensor(s.h_values))
+        assert m.temporal.h_basis == "canonical"
+        m.temporal.h_log_raw = torch.log(dtensor(s.h_values))
         m.g_delta = dtensor(s.g_delta)
         m.delay = dtensor(s.delays)
     return m
@@ -190,7 +191,7 @@ def assert_profile_matches_reference(s: Scenario, m: VelocityModel):
     with torch.no_grad():
         p_model = m.forward(x).numpy()
     t_ref = reference_replication_times(s)
-    growthrate = m.growthrate.item()
+    growthrate = m.temporal.growthrate.item()
     p_ref = np.exp(-growthrate * t_ref)
     # |dP/dt| = growthrate * P <= growthrate, so errors in t translate into errors in P of
     # at most growthrate times as large. Allow for a small absolute error on top.
@@ -231,3 +232,17 @@ def test_reference_detects_differences(change: dict):
     other = Scenario(**{**BASE_SCENARIO.__dict__, **change})
     with pytest.raises(AssertionError):
         assert_profile_matches_reference(BASE_SCENARIO, make_model(other))
+
+
+def test_temporal_attributes_cannot_be_assigned_on_velocity_model():
+    """ Assigning e.g. `h_log_raw` on the VelocityModel instead of its TemporalModel must fail loudly """
+    m = make_model(BASE_SCENARIO)
+    for name, value in [("h_log_raw", torch.zeros_like(m.temporal.h_log_raw)),
+                        ("v0_log", nn.Parameter(m.temporal.v0_log.clone())),
+                        ("growthrate", dtensor([1.0]))]:
+        with pytest.raises((AttributeError, KeyError), match="temporal"):
+            setattr(m, name, value)
+    # Attributes owned by VelocityModel itself, and nn.Module internals, can still be assigned
+    m.delay_scaled = nn.Parameter(m.delay_scaled)
+    m.train(False)
+    assert [n for n, _ in m.named_parameters()] == ["delay_scaled"]

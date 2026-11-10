@@ -337,10 +337,10 @@ MODEL = model.VelocityModel(
     g_delayscale=pt.tensor([f.delayscale for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.float64),
     v0_min=model.dtensor(ARGS.v0_min), v0_max=model.dtensor(ARGS.v0_max)
 )
-MODEL.growthrate[0] = ARGS.growthrate / 3600
-MODEL.h_cov_function = ARGS.vt_covariance
-MODEL.h_sigma[0] = ARGS.vt_magnitude
-MODEL.h_timescale[0] = DOUBLINGTIME * ARGS.vt_timescale
+MODEL.temporal.growthrate[0] = ARGS.growthrate / 3600
+MODEL.temporal.h_cov_function = ARGS.vt_covariance
+MODEL.temporal.h_sigma[0] = ARGS.vt_magnitude
+MODEL.temporal.h_timescale[0] = DOUBLINGTIME * ARGS.vt_timescale
 
 # Create loss function
 LOSS = model.VelocityModelLoss(
@@ -348,7 +348,7 @@ LOSS = model.VelocityModelLoss(
     y_obs=pt.tensor(ABUNDANCE["y_obs"].values, dtype=pt.float64),
     s_obs=pt.tensor(ABUNDANCE["s_obs"].values, dtype=pt.float64),
     model=MODEL,
-    params=["v0_log", "delay_scaled", "h_log_raw", "g_delta_scaled"])
+    params=["temporal.v0_log", "delay_scaled", "temporal.h_log_raw", "g_delta_scaled"])
 
 # Create fit instance
 ALG = fit.FitVelocityModel(MODEL, LOSS)
@@ -371,7 +371,7 @@ print(f"Parameters:")
 print(f"  growth rate: {ARGS.growthrate} [1/h]")
 print(f"  v(t) covariance: {ARGS.vt_covariance} "
       f"(makes v(t) { {'se': math.inf, 'm0': 0, 'm1': 1, 'm2': 2}[ARGS.vt_covariance] } times continuously differentiable)")
-print(f"  v(t) timescale: {MODEL.h_timescale[0]:.0f} [s] (= {ARGS.vt_timescale} doublingtimes)")
+print(f"  v(t) timescale: {MODEL.temporal.h_timescale[0]:.0f} [s] (= {ARGS.vt_timescale} doublingtimes)")
 print(f"  log v(t) std. err: {ARGS.vt_magnitude}")
 print(f"  v(x) delay scale: {ARGS.vx_delayscale}")
 
@@ -395,8 +395,8 @@ ALG.optimize_parameters_stochastic(perturb_reduce=ARGS.perturbation_reduction,
 
 # Compute posterior covariances of parameters
 print("*** COMPUTING POSTERIOR DISTRIBUTIONS")
-COV_V0, COV_V0_PMAP = MODEL.posterior_cov(LOSS, ["v0_log"])
-COV_HG, COV_HG_PMAP = MODEL.posterior_cov(LOSS, ["h_log_raw", "g_delta_scaled"])
+COV_V0, COV_V0_PMAP = MODEL.posterior_cov(LOSS, ["temporal.v0_log"])
+COV_HG, COV_HG_PMAP = MODEL.posterior_cov(LOSS, ["temporal.h_log_raw", "g_delta_scaled"])
 
 # Save results
 print("*** SAVING RESULTS")
@@ -462,10 +462,10 @@ if (ARGS.out_vt is not None) and (ARGS.out_vt != ""):
         # Build table
         cols = [('t', np.float64), ('vt', np.float64), ('vt_stderr', np.float64)]
         fmt = ('%.5f', '%.5f', '%.5f')
-        tab = np.zeros(MODEL.h_tgrid.shape[0], dtype=cols)
-        tab["t"] = MODEL.h_tgrid
-        tab["vt"] = MODEL.v_t(MODEL.h_tgrid).detach()
-        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
+        tab = np.zeros(MODEL.temporal.h_tgrid.shape[0], dtype=cols)
+        tab["t"] = MODEL.temporal.h_tgrid
+        tab["vt"] = MODEL.temporal.v_t(MODEL.temporal.h_tgrid).detach()
+        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.temporal.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
         # Write tab-separated to output file
         f = open_file(ARGS.out_vt, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
@@ -530,13 +530,13 @@ if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
         cols += [ (f"gx.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ] ]
         fmt += ('%.5f',) * (2*k)
         # Fill columns, v(t)=v0*h(t) first
-        tab = np.zeros(MODEL.h_tgrid.shape[0], dtype=cols)
-        tab["t"] = MODEL.h_tgrid.detach().numpy()
-        tab["v0"] = MODEL.v0.detach().numpy()
-        tab["vt"] = MODEL.v_t(MODEL.h_tgrid).detach().numpy()
-        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
+        tab = np.zeros(MODEL.temporal.h_tgrid.shape[0], dtype=cols)
+        tab["t"] = MODEL.temporal.h_tgrid.detach().numpy()
+        tab["v0"] = MODEL.temporal.v0.detach().numpy()
+        tab["vt"] = MODEL.temporal.v_t(MODEL.temporal.h_tgrid).detach().numpy()
+        tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.temporal.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
         # Now fill in x(t), v_r(t)=v0*h(t) / g(x) and g(x) for all replisomes
-        tab_state, tab_x, tab_dx, tab_v = MODEL.trajectories(MODEL.h_tgrid)
+        tab_state, tab_x, tab_dx, tab_v = MODEL.trajectories(MODEL.temporal.h_tgrid)
         for o_i, o in enumerate(ORIGINS):
             if o.chr != SINGLE_CHROMOSOME:
                 continue
@@ -568,18 +568,18 @@ if (ARGS.plot_vt is not None) and (ARGS.plot_vt != ""):
         print(f"Plotting v(t) to {ARGS.plot_vt}")
         with pt.no_grad():
             x_min = LOSS.x[pt.argmin(LOSS.y_pred())]
-            t_fin = MODEL.Hinv(MODEL.T(x_min))
+            t_fin = MODEL.temporal.Hinv(MODEL.T(x_min))
             t_max = max(t_fin, DOUBLINGTIME) * 1.2
 
-            plot_t = MODEL.h_tgrid
-            plot_vt = MODEL.v_t(MODEL.h_tgrid).detach()
-            plot_vt_stderr = MODEL.v_t_posterior_stderr(MODEL.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
+            plot_t = MODEL.temporal.h_tgrid
+            plot_vt = MODEL.temporal.v_t(MODEL.temporal.h_tgrid).detach()
+            plot_vt_stderr = MODEL.v_t_posterior_stderr(MODEL.temporal.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
             plot_yrange = [0.8 * pt.min(plot_vt[plot_t <= t_fin]).item(), pt.max(plot_vt[plot_t <= t_fin]).item() * 1.2]
 
         pp.clf()
         pp.figure(figsize=(2.5, 2.0))
         pp.ylim(plot_yrange)
-        pp.axhline(y=MODEL.v0.detach().numpy(), linestyle="dotted", color="black", linewidth=0.5)
+        pp.axhline(y=MODEL.temporal.v0.detach().numpy(), linestyle="dotted", color="black", linewidth=0.5)
         pp.step(plot_t.numpy() / DOUBLINGTIME, plot_vt.numpy(), linewidth=0.5, color="navy")
         pp.fill_between(plot_t.numpy() / DOUBLINGTIME,
                         plot_vt.numpy() - 2 * plot_vt_stderr.numpy(), plot_vt.numpy() + 2 * plot_vt_stderr.numpy(),
