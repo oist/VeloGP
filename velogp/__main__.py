@@ -217,7 +217,7 @@ for gff_filename in ARGS.gff:
                 f_matching_feature_names = [ fn for fn in f_names if fn in ARGS.vx_feature_names]
                 if (f.type in ARGS.vx_feature_types) or len(f_matching_feature_names) > 0:
                     # Named should be unambiguous
-                    for fn in [fn not in VX_FEATURE_NAMES_TO_BE_RESOLVED for fn in f_matching_feature_names]:
+                    for fn in [fn for fn in f_matching_feature_names if fn not in VX_FEATURE_NAMES_TO_BE_RESOLVED]:
                         raise ArgumentError(f"feature name {fn} is ambiguous")
                     # Create feature
                     # NOTE: GFF positions are one-based and end is included, but BCBio.GFF already
@@ -239,7 +239,7 @@ for gff_filename in ARGS.gff:
                 f_matching_origin_names = [ fn for fn in f_names if fn in ORIGINS_NAMES]
                 if len(f_matching_origin_names) > 0:
                     # Named should be unambiguous
-                    for fn in [fn not in ORIGINS_NAMES_TO_BE_RESOLVED for fn in f_matching_origin_names]:
+                    for fn in [fn for fn in f_matching_origin_names if fn not in ORIGINS_NAMES_TO_BE_RESOLVED]:
                         raise ArgumentError(f"feature name {fn} is ambiguous")
                     origin = Origin(chr=seq, pos=int((f.location.start + f.location.end)/2), name=f_matching_origin_names[0])
                     ORIGINS.append(origin)
