@@ -32,7 +32,9 @@ class SplitAndAdd(argparse.Action):
         for vs in values:
             for v in vs.split(","):
                 if len(v) > 0:
-                    getattr(namespace, self.dest, set()).add(v)
+                    if getattr(namespace, self.dest, None) is None:
+                        setattr(namespace, self.dest, set())
+                    getattr(namespace, self.dest).add(v)
 
 def open_file(filename, mode):
     if filename.endswith(".gz"):
@@ -55,6 +57,9 @@ class Origin:
     chr: str
     pos: int
     name : str
+
+# Origins used if none are specified with --origins. This is the GFF feature type of origins of replication
+DEFAULT_ORIGINS = "origin_of_replication"
 
 # Make output unbuffered
 sys.stdout = io.TextIOWrapper(open(sys.stdout.fileno(), 'wb', 0), write_through=True)
@@ -86,8 +91,12 @@ parser.add_argument("--plot-vt", metavar="filename",
                     help="output file for a plot of the velocity as a function of time")
 parser.add_argument("--growthrate", default=1.0, type=float, metavar="lambda",
                     help="growthrate of sequenced population [1/hour]")
-parser.add_argument("--origins", default={"oriC"}, metavar="origin,origin,...", action=SplitAndAdd,
-                    help="names or locations of origins of replication")
+parser.add_argument("--origins", default=None, metavar="origin,origin,...", action=SplitAndAdd,
+                    help="origins of replication, specified by location ([chr:]pos), by name, or by GFF feature type. "
+                         "A name must match exactly one feature, a type matches all features of that type, which are "
+                         "named <type>1, ..., <type>N in order of chromosome name and position (even if they also "
+                         "match a name). "
+                         f"Default: {DEFAULT_ORIGINS}")
 parser.add_argument("--v0-min", default=10, type=float,
                     help="minimum baseline velocity")
 parser.add_argument("--v0-max", default=10000, type=float,
@@ -135,6 +144,10 @@ parser.add_argument("--perturbation-min", type=float, default=0.001,
 
 # Parse arguments
 ARGS = parser.parse_args()
+
+# Use the default origins only if no origins were specified
+if not ARGS.origins:
+    ARGS.origins = { DEFAULT_ORIGINS }
 
 # Post-process column names
 ARGS.columns = ARGS.columns.split(",")
@@ -189,6 +202,8 @@ for origin in ARGS.origins:
     # NOTE: Locations on the command-line are one-based
     ORIGINS.append(Origin(chr=chr, pos=pos-1, name=origin))
 ORIGINS_NAMES_TO_BE_RESOLVED : Set[str] = ORIGINS_NAMES.copy()
+# Origins found by GFF feature type (rather than by name) for each type, named once all GFF files have been read
+ORIGINS_BY_TYPE : Dict[str, List[Origin]] = {}
 
 # Genomic features at which replisomes might slow down
 VX_FEATURES_TENTATIVE : List[Feature] = list()
@@ -242,18 +257,31 @@ for gff_filename in ARGS.gff:
                     # Removed from to-be-resolved list
                     for fn in f_matching_feature_names:
                         VX_FEATURE_NAMES_TO_BE_RESOLVED.remove(fn)
-                # Resolve unresolved origin names
+                # Resolve unresolved origin names, add all features of requested types
                 f_matching_origin_names = [ fn for fn in f_names if fn in ORIGINS_NAMES]
-                if len(f_matching_origin_names) > 0:
+                f_matching_origin_type = f.type in ORIGINS_NAMES
+                if (len(f_matching_origin_names) > 0) or f_matching_origin_type:
                     # Named should be unambiguous
                     for fn in [fn for fn in f_matching_origin_names if fn not in ORIGINS_NAMES_TO_BE_RESOLVED]:
                         raise ArgumentError(f"feature name {fn} is ambiguous")
-                    origin = Origin(chr=seq, pos=int((f.location.start + f.location.end)/2), name=f_matching_origin_names[0])
+                    # Origins matched by type are named below, even if they are also matched by name. This keeps the
+                    # numbering of the origins of a type independent of which of them are also requested by name.
+                    origin = Origin(chr=seq, pos=int((f.location.start + f.location.end)/2),
+                                    name=None if f_matching_origin_type else f_matching_origin_names[0])
                     ORIGINS.append(origin)
+                    if f_matching_origin_type:
+                        ORIGINS_BY_TYPE.setdefault(f.type, []).append(origin)
                     for fn in f_matching_origin_names:
                         ORIGINS_NAMES_TO_BE_RESOLVED.remove(fn)
+                    # A type may match any number of features
+                    ORIGINS_NAMES_TO_BE_RESOLVED.discard(f.type)
     finally:
         gff_file.close()
+
+# Name origins found by type <type>1, ..., <type>N, ordered by chromosome name and position
+for o_type, o_list in ORIGINS_BY_TYPE.items():
+    for i, origin in enumerate(sorted(o_list, key=lambda o: (o.chr, o.pos))):
+        origin.name = f"{o_type}{i + 1}"
 
 # Read BED files
 for bed_filename in ARGS.bed:
@@ -292,7 +320,8 @@ for bed_filename in ARGS.bed:
 if len(VX_FEATURE_NAMES_TO_BE_RESOLVED) > 0:
     raise ArgumentError(f"unable to resolve feature names {', '.join(VX_FEATURE_NAMES_TO_BE_RESOLVED)}")
 if len(ORIGINS_NAMES_TO_BE_RESOLVED) > 0:
-    raise ArgumentError(f"unable to resolve origin names {', '.join(ORIGINS_NAMES_TO_BE_RESOLVED)}")
+    raise ArgumentError(f"unable to resolve origins {', '.join(sorted(ORIGINS_NAMES_TO_BE_RESOLVED))}: no feature in "
+                        f"the GFF or BED files has this name or (GFF only) type")
 
 # Sort features and origins
 VX_FEATURES_TENTATIVE.sort(key=lambda f: (f.chr, f.begin))
