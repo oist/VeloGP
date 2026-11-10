@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any, Dict, Optional, Union, Tuple, List
+import dataclasses
 from dataclasses import dataclass
 
 import numpy as np
@@ -76,6 +77,10 @@ class VelocityModel(nn.Module):
         has_right: Tensor
         # Whether x coincides with an origin
         at_origin: Tensor
+
+        def __getitem__(self, k) -> VelocityModel.X:
+            """ Returns the pre-processed input for the subset x[k] of positions """
+            return VelocityModel.X(*(getattr(self, f.name)[k] for f in dataclasses.fields(self)))
 
     def __init__(self, genome_length: int, is_circular: bool,
                  origins: IntTensor, origin_names: list[str],
@@ -1303,7 +1308,7 @@ class VelocityModelLoss(nn.Module):
             #       for every k. This is intended, since the gradient of M(x) in Eq. (S1.30) includes
             #       the dependence of the scale factor on the parameters. Computing the gradient
             #       of scale once and applying the product rule would allow us to re-enable donated buffers.
-            y_pred = scale * self.model(self.x[k])
+            y_pred = scale * self.model(self.x_prep[k])
             y_pred.backward(inputs=[p for n, p in params], retain_graph=True)
             J[k, :] = self.model.pgradient(params, (c, pmap))
         return J, pmap
