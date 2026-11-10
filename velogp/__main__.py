@@ -489,7 +489,7 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         cols = [ ('chr', f'U{chr_slen}'), ('begin', np.int32), ('end', np.int32), ('length', np.int32),
                  ('name', f'U{fn_slen}'), ('delayscale', np.float64),
                  ('g', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64) ]
-        fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f', '%.5f', '%.5f')
+        fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f')
         tab = np.zeros(MODEL.g_delta.shape[0], dtype=cols)
         features = list([f for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME])
         tab["chr"] = [f.chr for f in features ]
