@@ -241,7 +241,7 @@ for gff_filename in ARGS.gff:
                     # Named should be unambiguous
                     for fn in [fn not in ORIGINS_NAMES_TO_BE_RESOLVED for fn in f_matching_origin_names]:
                         raise ArgumentError(f"feature name {fn} is ambiguous")
-                    origin = Origin(chr=f.id, pos=int((f.location.start + f.location.end)/2), name=f_matching_origin_names[0])
+                    origin = Origin(chr=seq, pos=int((f.location.start + f.location.end)/2), name=f_matching_origin_names[0])
                     ORIGINS.append(origin)
                     for fn in f_matching_origin_names:
                         ORIGINS_NAMES_TO_BE_RESOLVED.remove(fn)
