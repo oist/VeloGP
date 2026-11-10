@@ -33,7 +33,7 @@ import pytest
 import torch
 from torch import nn
 
-from velogp import ChromosomeModel, TemporalModel, VelocityModel, dtensor
+from velogp import ChromosomeModel, TemporalModel, VelocityModel, VelocityModelLoss, dtensor
 
 
 @dataclass
@@ -395,3 +395,80 @@ def test_trajectories_concatenate_chromosomes():
         separate = [c.trajectories(m.temporal, t) for c in m.chromosomes]
     for i, tab in enumerate(combined):
         torch.testing.assert_close(tab, torch.cat([s[i] for s in separate], dim=-1), rtol=0, atol=0, equal_nan=True)
+
+
+def make_genome_loss(n: int = 80, permutation: torch.Tensor | None = None) -> tuple[VelocityModel, VelocityModelLoss]:
+    """ Creates a two-chromosome model with all parameters trainable, and a loss for synthetic observations """
+    m = make_genome_model()
+    m.temporal.v0_log = nn.Parameter(m.temporal.v0_log)
+    m.temporal.h_log_raw = nn.Parameter(m.temporal.h_log_raw)
+    for c in m.chromosomes:
+        c.delay_scaled = nn.Parameter(c.delay_scaled)
+        c.g_delta_scaled = nn.Parameter(c.g_delta_scaled)
+    x, c = genome_positions()
+    x, c = x[:n].double(), c[:n]
+    with torch.no_grad():
+        p = m.forward(m.prepare_input(x, c))
+    noise = 1 + 0.01 * torch.randn(n, dtype=torch.float64, generator=torch.Generator().manual_seed(1))
+    y, s = 2.0 * p * noise, 0.01 * torch.ones(n, dtype=torch.float64)
+    if permutation is not None:
+        x, c, y, s = x[permutation], c[permutation], y[permutation], s[permutation]
+    params = ["temporal.v0_log", "temporal.h_log_raw", "chromosomes.0.delay_scaled", "chromosomes.0.g_delta_scaled",
+              "chromosomes.1.delay_scaled", "chromosomes.1.g_delta_scaled"]
+    return m, VelocityModelLoss(x, y, s, m, params, chromosome=c)
+
+
+def test_multi_chromosome_loss_value():
+    """ The abundances on all chromosomes are scaled by a single factor """
+    m, loss = make_genome_loss()
+    with torch.no_grad():
+        p = m.forward(m.prepare_input(loss.x, loss.chromosome))
+        scale = torch.mean(loss.y_obs) / torch.mean(p)
+        expected = 0.5 * torch.sum(loss.weights * (loss.y_obs - scale * p) ** 2)
+        expected += sum(m.prior(pp, False).reshape(()) for _, pp in m.resolve_params(loss.params))
+        torch.testing.assert_close(loss(), expected, rtol=1e-12, atol=0)
+        # The loss does not depend on the order of the observations
+        _, loss_perm = make_genome_loss(permutation=torch.randperm(80, generator=torch.Generator().manual_seed(2)))
+        torch.testing.assert_close(loss_perm(), loss(), rtol=1e-12, atol=0)
+
+
+def test_multi_chromosome_loss_requires_chromosomes():
+    m, loss = make_genome_loss()
+    with pytest.raises(ValueError):
+        VelocityModelLoss(loss.x, loss.y_obs, loss.s_obs, m, loss.params)
+    with pytest.raises(IndexError):
+        VelocityModelLoss(loss.x, loss.y_obs, loss.s_obs, m, loss.params, chromosome=torch.full_like(loss.chromosome, 2))
+    names = [m.chromosomes[i].name for i in loss.chromosome.tolist()]
+    loss_names = VelocityModelLoss(loss.x, loss.y_obs, loss.s_obs, m, loss.params, chromosome=names)
+    assert torch.equal(loss_names.chromosome, loss.chromosome)
+
+
+def test_multi_chromosome_jacobian():
+    """ The per-position Jacobian must match derivatives of the jointly computed prediction """
+    m, loss = make_genome_loss(n=40)
+    J, pmap = loss.jacobian(None)
+    params = [p for _, p in m.resolve_params(loss.params)]
+    y_pred = loss.y_pred()
+    for k in range(len(loss.x)):
+        g = torch.autograd.grad(y_pred[k], params, retain_graph=True, allow_unused=True)
+        row = torch.cat([(gi if gi is not None else torch.zeros_like(p)).reshape(-1) for gi, p in zip(g, params)])
+        torch.testing.assert_close(J[k], row, rtol=1e-10, atol=1e-14)
+    # Through the common scale factor, predictions on one chromosome depend on the parameters of the other
+    i = pmap["chromosomes.1.g_delta_scaled"]
+    assert torch.any(J[loss.chromosome == 0, i:i + m.chromosomes[1].g_delta_scaled.numel()] != 0)
+
+
+def test_multi_chromosome_posterior_includes_all_priors():
+    """ The posterior precision matrix contains the prior precision blocks of h(t) and of g(x) of every chromosome """
+    m, loss = make_genome_loss(n=40)
+    u, pmap = m.posterior_cov_inv(loss, loss.params)
+    u0, pmap0 = m.posterior_cov_inv(loss, loss.params, ignore_priors=True)
+    assert pmap == pmap0
+    expected = torch.zeros_like(u)
+    blocks = [("temporal.h_log_raw", m.temporal.h_cov_inv(include_sigma=True))]
+    blocks += [(f"chromosomes.{i}.g_delta_scaled", torch.diagflat(1.0 / c.g_delta_prefactor ** 2))
+               for i, c in enumerate(m.chromosomes)]
+    for name, block in blocks:
+        i, l = pmap[name], block.shape[0]
+        expected[i:i + l, i:i + l] = block
+    torch.testing.assert_close(u - u0, expected, rtol=1e-10, atol=1e-10)

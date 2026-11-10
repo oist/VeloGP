@@ -1323,6 +1323,35 @@ class VelocityModel(nn.Module):
                 g[ci:(ci + ni)] = pi.grad
         return g
 
+    def chromosome_indices(self, chromosome: str | int | List[str | int] | Tensor | None, shape: torch.Size) -> Tensor:
+        """
+        Returns the index of the chromosome containing each of a set of locations
+
+        :param chromosome: the chromosome(s) containing the locations. Either a single chromosome name or index which
+        applies to all locations, a list of names or indices or an integer tensor of indices with one entry per
+        location, or None if the genome comprises only a single chromosome.
+        :param shape: the shape of the tensor containing the locations
+        :return: an integer tensor of the given shape containing the chromosome indices
+        """
+        with no_grad():
+            if chromosome is None:
+                if len(self.chromosomes) != 1:
+                    raise ValueError("chromosome must be specified if the genome comprises more than one chromosome")
+                c_idx = zeros(shape, dtype=torch.long)
+            elif isinstance(chromosome, (str, builtins.int)):
+                c_idx = full(shape, self.chromosome_index(chromosome), dtype=torch.long)
+            elif isinstance(chromosome, Tensor):
+                if chromosome.dtype.is_floating_point or chromosome.dtype == torch.bool:
+                    raise ValueError("chromosome must be an integer tensor of chromosome indices")
+                c_idx = chromosome.long()
+                if (numel(c_idx) > 0) and ((min(c_idx) < 0) or (max(c_idx) >= len(self.chromosomes))):
+                    raise IndexError("chromosome index out of range")
+            else:
+                c_idx = tensor([self.chromosome_index(c) for c in chromosome], dtype=torch.long)
+            if c_idx.shape != shape:
+                raise ValueError("chromosome must have the same shape as x")
+        return c_idx
+
     def prepare_input(self, x: Tensor, chromosome: str | int | List[str | int] | Tensor | None = None) -> VelocityModel.X:
         """
         Performs parameter-independent computations on the model input (i.e. tensor containing genomic locations),
@@ -1330,25 +1359,12 @@ class VelocityModel(nn.Module):
         speeds up the computation.
 
         :param x: tensor containing genomic locations
-        :param chromosome: the chromosome(s) containing the locations. Either a single chromosome name or index which
-        applies to all locations, a list of names or indices or an integer tensor of indices with one entry per
-        location, or None if the genome comprises only a single chromosome.
+        :param chromosome: the chromosome(s) containing the locations, see `chromosome_indices()`
         :return: `VelocityModel.X` instance containing pre-processed input
         """
         with no_grad():
             # Determine the index of the chromosome containing each location
-            if chromosome is None:
-                if len(self.chromosomes) != 1:
-                    raise ValueError("chromosome must be specified if the genome comprises more than one chromosome")
-                c_idx = zeros(x.shape, dtype=torch.long)
-            elif isinstance(chromosome, (str, builtins.int)):
-                c_idx = full(x.shape, self.chromosome_index(chromosome), dtype=torch.long)
-            elif isinstance(chromosome, Tensor):
-                c_idx = chromosome.long()
-            else:
-                c_idx = tensor([self.chromosome_index(c) for c in chromosome], dtype=torch.long)
-            if c_idx.shape != x.shape:
-                raise ValueError("chromosome must have the same shape as x")
+            c_idx = self.chromosome_indices(chromosome, x.shape)
             # Pre-process the locations on each chromosome
             x_flat, c_flat = x.reshape(-1), c_idx.reshape(-1)
             parts, indices = [], []
@@ -1482,14 +1498,35 @@ class VelocityModel(nn.Module):
         
 
 class VelocityModelLoss(nn.Module):
-    def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel, params: List[nn.Parameter]):
+    """
+    The negative log-posterior of the model parameters given observed abundances y_obs (with standard errors s_obs)
+
+    The observations may lie on several chromosomes. Since they stem from a single sample, the predicted abundances
+    on all chromosomes are scaled by the same factor, which is chosen such that the mean predicted abundance matches
+    the mean observed abundance. This factor depends on all parameters, so the predicted abundance at a position on
+    one chromosome depends (weakly) on the parameters of all other chromosomes as well.
+    """
+
+    def __init__(self, x: Tensor, y_obs: Tensor, s_obs: Tensor, model: VelocityModel, params: List[nn.Parameter],
+                 chromosome: str | int | List[str | int] | Tensor | None = None):
+        """
+        :param x: 1-d tensor containing the genomic positions of the observations
+        :param y_obs: observed abundances, the first dimension must match x
+        :param s_obs: standard errors of the observed abundances, must have the same shape as y_obs
+        :param model: the model
+        :param params: the parameters which are being fitted, their priors are included in the loss
+        :param chromosome: the chromosome(s) containing the positions x, see `VelocityModel.chromosome_indices()`.
+        May be omitted if the genome comprises only a single chromosome.
+        """
         super().__init__()
         self.model = model
         self.params = params
         self.x = x
         self.x.requires_grad = False
-        self.x_prep = self.model.prepare_input(self.x)
         assert self.x.dim() == 1
+        # Index of the chromosome containing each position, i.e. x[i] lies on model.chromosomes[chromosome[i]]
+        self.chromosome = self.model.chromosome_indices(chromosome, self.x.shape)
+        self.x_prep = self.model.prepare_input(self.x, self.chromosome)
         self.y_obs = y_obs
         self.y_obs.requires_grad = False
         if any(isnan(self.y_obs)):
