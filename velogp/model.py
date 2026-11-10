@@ -802,6 +802,11 @@ class VelocityModel(nn.Module):
         Delta_l, Delta_r are the (physical) delays with which these origins fire, see Eq. (S1.6). On linear
         chromosomes, locations left of the first or right of the last origin have only one surrounding origin.
 
+        A location x = o_i that coincides with an origin is its own left and right surrounding origin. Such a
+        location is replicated either when o_i fires, or when the replisome of one of the adjacent origins
+        o_(i-1), o_(i+1) reaches o_i, whichever happens first. Replisomes still stop at the adjacent origin, i.e.
+        locations beyond o_i are never replicated by the replisomes of o_(i-1) respectively o_(i+1).
+
         :param x: Genomic locations as a tensor of arbitrary shape or as a prepapred input returned by self.prepare_input
         :return: Virtual replication times as a tensor of the same shape
         """
@@ -809,12 +814,26 @@ class VelocityModel(nn.Module):
         delay_virtual = self.H(self.delay)
         t_left = delay_virtual[x_prep.origin_index_left] + self.G(x_prep.x, self.origins[x_prep.origin_index_left], dtensor([+1.0])) / self.v0
         t_right = delay_virtual[x_prep.origin_index_right] + self.G(x_prep.x, self.origins[x_prep.origin_index_right], dtensor([-1.0])) / self.v0
+        # Virtual times at which the replisomes of the adjacent origins o_(i-1) and o_(i+1) reach origin o_i
+        origins_prev, delay_virtual_prev = roll(self.origins, 1), roll(delay_virtual, 1)
+        origins_next, delay_virtual_next = roll(self.origins, -1), roll(delay_virtual, -1)
+        arrival_from_prev = delay_virtual_prev + self.G(self.origins, origins_prev, dtensor([+1.0])) / self.v0
+        arrival_from_next = delay_virtual_next + self.G(self.origins, origins_next, dtensor([-1.0])) / self.v0
         if not self.is_circular:
             # surrounding_origins() returns origin index 0 if there is no origin to the left or right on a
             # linear chromosome. Exclude these, otherwise G() is negative and T(x) precedes the origin firing time.
             t_left = where(x_prep.x >= self.origins[0], t_left, dtensor(float('inf')))
             t_right = where(x_prep.x <= self.origins[-1], t_right, dtensor(float('inf')))
-        return minimum(t_left, t_right)
+            # The first origin has no left neighbour and the last origin no right neighbour on a linear chromosome
+            is_first = arange(numel(self.origins)) == 0
+            is_last = arange(numel(self.origins)) == numel(self.origins) - 1
+            arrival_from_prev = where(is_first, dtensor(float('inf')), arrival_from_prev)
+            arrival_from_next = where(is_last, dtensor(float('inf')), arrival_from_next)
+        arrival_from_adjacent = minimum(arrival_from_prev, arrival_from_next)
+        # Locations that coincide with an origin are also replicated by the replisomes of the adjacent origins
+        at_origin = x_prep.x == self.origins[x_prep.origin_index_left]
+        t = minimum(t_left, t_right)
+        return where(at_origin, minimum(t, arrival_from_adjacent[x_prep.origin_index_left]), t)
 
     def P(self, x: Tensor | X) -> Tensor:
         """Returns the predicted DNA abundance P(x)
