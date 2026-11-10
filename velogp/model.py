@@ -156,6 +156,8 @@ class VelocityModel(nn.Module):
             # [ l_1, u_1, l_2, u_2, .... ] where l = from g_xranges_l, u = g_xranges_u
             self.g_xgrid = cat((tensor([0]), flatten(stack((self.g_xranges_l, self.g_xranges_u), dim=1))))
             self.g_xgrid.requires_grad = False
+            # Floating-point copy of g_xgrid used for lookups with torch.searchsorted()
+            self.g_xgrid_double = self.g_xgrid.double()
             self.g_xgrid_len = cat((self.g_xgrid[1:], dtensor([genome_length]))) - self.g_xgrid
             self.g_xgrid_len.requires_grad = False
             self.g_delta_scaled = zeros(self.g_xranges_l.size(), dtype=torch.float64)
@@ -552,6 +554,20 @@ class VelocityModel(nn.Module):
             lt = t[None, ...] < h_tgrid_augmented[(...,) + (None,) * t.dim()]
             return argmax(lt.view(torch.int8), dim=0) - tensor([1])
 
+    @staticmethod
+    def grid_index(grid: Tensor, x: Tensor) -> Tensor:
+        """
+        Returns for each x the largest i such that grid[i] <= x (or -1 if there is none)
+
+        :param grid: 1-d tensor of grid points in ascending order
+        :param x: tensor of arbitrary shape
+        :return: tensor of indices with the same shape as x
+        """
+        with no_grad():
+            g = grid.detach()
+            v = x.detach().to(g.dtype).reshape(-1)
+            return (torch.searchsorted(g, v, right=True) - 1).reshape(x.shape)
+
     def h(self, t: Tensor, interpolate=True) -> Tensor:
         """Evaluates h(t) at the specified points t
 
@@ -707,18 +723,9 @@ class VelocityModel(nn.Module):
         :return: G(x,o) as a tensor of the same shape as x
         """
         assert all(logical_and(x >= tensor([0]), x <= tensor([self.genome_length])))
-        # Tensor dist_ij = x[j] - g_xgrid[i] (j can comprise multiple indices)
-        dist = x[None,...] - self.g_xgrid[(...,) + (None,) * x.dim()]
-        with no_grad():
-            # Tensors with the same shape as dist which contain 0 respectively g_xgrid[i+1] - g_xgrid[i].
-            zeros = zeros_like(dist)
-            length = ones_like(dist) * self.g_xgrid_len[(...,) + (None,) * x.dim()]
-            # Tensor containing the length of the intersection of [0, t[j]] and [h_tgrid[i], h_tgrid[i+1]]
-            c = maximum(zeros, minimum(dist, length))
-        # Create vector of values of g(x) at the grid points g_xgrid
-        g = cat((dtensor([1.0]), flatten(stack((self.g, ones_like(self.g_delta_scaled)), dim=1))))
-        # G(x[j]) = sum_i g[i] * c[i,j]
-        return sum(c * g[(...,) + (None,) * x.dim()], dim=0)
+        g, G = self.g_grid_values()
+        idx, offset = self.g_grid_locate(x)
+        return G[idx] + offset * g[idx]
 
     def g_grid_values(self) -> Tuple[Tensor, Tensor]:
         """
@@ -739,13 +746,9 @@ class VelocityModel(nn.Module):
         :return: Pair (i, d) of tensors with the same shape as x where i is the index of the grid cell containing x,
         i.e. g_xgrid[i] <= x < g_xgrid[i+1], and d = x - g_xgrid[i] the offset of x within that cell
         """
-        # NOTE: We append +inf to g_xgrid, since that guarantees that the lookup below always finds
-        #       at least one grid cell where x < g_xgrid.
-        g_xgrid_augmented = cat((self.g_xgrid.double(), dtensor([float('inf')])))
         with no_grad():
-            lt = x[None, ...] < g_xgrid_augmented[(...,) + (None,) * x.dim()]
-            idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
-            return idx, x.double() - self.g_xgrid[idx]
+            idx = self.grid_index(self.g_xgrid_double, x)
+            return idx, x.double() - self.g_xgrid_double[idx]
 
     def G_0_inv(self, z: Tensor):
         """
@@ -756,19 +759,16 @@ class VelocityModel(nn.Module):
         """
 
         assert all(z >= 0)
-        # Create vector of values of g(x) at the grid points g_xgrid
-        g = cat((dtensor([1.0]), flatten(stack((self.g, ones_like(self.g_delta_scaled)), dim=1))))
-        # Create vector of values of G_0(x) at the grid points g_xgrid
+        # Values of g(x) and G_0(x) at the grid points g_xgrid
         # Note: We add an extra point at the end to account for numerical
         # inaccuracies in z. Other than x, which is an integer tensor, z
         # is a floating-point tensor!
-        Gp = torch.cumsum(self.g_xgrid_len * g, dim=0)
-        G = cat((dtensor([0.0]), Gp, Gp[-1, None]+1), dim=0)
+        g, Gp = self.g_grid_values()
+        G = cat((Gp, Gp[-1, None]+1), dim=0)
         assert all(z < G[-1])
         # Find x_i where G(x_i) <= z but G(x_(i+1)) > z
         with no_grad():
-            lt = z[None, ...] < G[(...,) + (None,) * z.dim()]
-            idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
+            idx = self.grid_index(G, z)
             # z = G_0(L) (i.e. the chromosome end) lies in the extra cell added above, map it to the last
             # real grid cell. This happens for replisomes that reached the end of a linear chromosome.
             idx = clamp(idx, max=numel(self.g_xgrid) - 1)
@@ -795,13 +795,9 @@ class VelocityModel(nn.Module):
         return result
 
     def g_fun(self, x: Tensor):
-        # Create vector of values of g(x) at the grid points g_xgrid
-        g = cat((dtensor([1.0]), flatten(stack((self.g, ones_like(self.g_delta_scaled)), dim=1))))
-        # Find i where x_grid[i] <= z but x_grid[i+1 > z
-        with no_grad():
-            lt = x[None, ...] < self.g_xgrid[(...,) + (None,) * x.dim()]
-            idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
-        # Return g[i]
+        # Find i where x_grid[i] <= x but x_grid[i+1] > x and return g[i]
+        g, _ = self.g_grid_values()
+        idx, _ = self.g_grid_locate(x)
         return g[idx]
 
 
