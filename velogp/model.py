@@ -676,14 +676,39 @@ class ChromosomeModel(nn.Module):
             self.g_xgrid_len.requires_grad = False
             self.g_delta_scaled = zeros(self.g_xranges_l.size(), dtype=torch.float64)
             # If provided, g_delayscale specifies for each g range, the magnitudes of the expected delays,
-            # measured relative to the time a single replisome would take to replicate the chromosome.
-            if g_delayscale is None:
-                self.g_delta_prefactor = ones_like(self.g_delta_scaled)
-            else:
+            # measured relative to the time a single replisome would take to replicate the *genome*, i.e.
+            # a stretch of length `reference_length`. Until the chromosome becomes part of a `VelocityModel`, which
+            # sets the reference length to the total length of all its chromosomes, this is the chromosome itself.
+            if g_delayscale is not None:
                 # Check that we have as many delayscales as g ranges
                 assert (g_delayscale.dim() == 1) and (g_delayscale.size() == self.g_xranges_l.size())
-                self.g_delta_prefactor = g_delayscale.double() * self.length.double() / self.g_xranges_len.double()
+            self.g_delayscale = g_delayscale
+            self.reference_length = self.length
+            self.g_delta_prefactor = self.compute_g_delta_prefactor(self.reference_length)
             self.g_delta_scaled.requires_grad = False
+
+    def compute_g_delta_prefactor(self, reference_length: Tensor) -> Tensor:
+        """ The scale of g_delta for each g range, i.e. the expected value of g_delta under its prior """
+        if self.g_delayscale is None:
+            return ones_like(self.g_delta_scaled)
+        return self.g_delayscale.double() * reference_length.double() / self.g_xranges_len.double()
+
+    def set_reference_length(self, reference_length: int | Tensor):
+        """
+        Sets the length relative to which `g_delayscale` is measured, see `__init__()`
+
+        Changes the prior on g_delta, but preserves the current value of g_delta.
+        """
+        reference_length = tensor([reference_length], dtype=torch.int32) \
+            if not isinstance(reference_length, Tensor) else reference_length.reshape(1).to(torch.int32)
+        if torch.equal(reference_length, self.reference_length):
+            return
+        with no_grad():
+            g_delta = self.g_delta
+            self.reference_length = reference_length
+            self.g_delta_prefactor = self.compute_g_delta_prefactor(reference_length)
+            # Update in-place to preserve the identity of the parameter object
+            self.g_delta_scaled.copy_(g_delta / self.g_delta_prefactor)
 
     def clamp_parameters(self):
         """ Clamp parameters to their respective domains, see `VelocityModel.clamp_parameters()`
@@ -1150,6 +1175,20 @@ class VelocityModel(nn.Module):
         # NOTE: We use a list instead of a nn.ModuleDict because chromosome names may contain '.', which
         # nn.ModuleDict does not allow. Parameter names are therefore 'chromosomes.<index>.<parameter>'.
         self.chromosomes = nn.ModuleList(chromosomes)
+        # The expected delays at g ranges (see `ChromosomeModel.__init__()`) are relative to the replication time
+        # of the whole genome
+        for c in self.chromosomes:
+            c.set_reference_length(self.length)
+
+    @property
+    def length(self) -> Tensor:
+        """ The total length of all chromosomes """
+        return sum(cat([c.length for c in self.chromosomes])).reshape(1)
+
+    @property
+    def length_virtual(self) -> Tensor:
+        """ The total length of all chromosomes in virtual coordinates """
+        return sum(cat([c.length_virtual.reshape(1) for c in self.chromosomes])).reshape(1)
 
     @classmethod
     def single_chromosome(cls, genome_length: int, is_circular: bool,

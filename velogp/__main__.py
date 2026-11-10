@@ -113,6 +113,8 @@ parser.add_argument("--gff", default=[], metavar="gff-file", action="append",
 parser.add_argument("--bed", default=[], metavar="bed-file", action="append",
                     help="BED file containing genome annotations, must contain at least 4 columns chrom,start,end,name, " +
                     "(may be compressed)")
+parser.add_argument("--linear-chromosomes", default=set(), metavar="chromosome,chromosome,...", action=SplitAndAdd,
+                    help="names of linear chromosomes, all other chromosomes are assumed to be circular")
 parser.add_argument("--genome", required=True, metavar="fasta-file",
                     help="FASTA file containing the reference genome (may be compressed)")
 parser.add_argument("--columns", default="seq,midpoint,coverage_ratio,coverage_ratio_stderr,ratio_mappable",
@@ -159,6 +161,11 @@ try:
     SINGLE_CHROMOSOME = next(iter(CHROMOSOME_LENGTHS.keys())) if len(CHROMOSOME_LENGTHS) == 1 else None
 finally:
     fasta_file.close()
+# Chromosomes in the order in which they appear in the genome, i.e. in the order used by the model
+CHROMOSOME_NAMES : List[str] = list(CHROMOSOME_LENGTHS.keys())
+for chr in ARGS.linear_chromosomes:
+    if chr not in CHROMOSOME_LENGTHS:
+        raise ArgumentError(f"linear chromosome {chr} does not exist in genome {ARGS.genome}")
 
 # Origins of replication
 # NOTE: Origins specified by name are resolved during GFF/BED file parsing
@@ -309,15 +316,37 @@ for chr in CHROMOSOME_LENGTHS.keys():
     if len([o for o in ORIGINS if o.chr == chr]) == 0:
         raise ArgumentError(f"chromosome {chr} contains no origin")
 
-# Multiple chromosomes are not yet supported
-if not SINGLE_CHROMOSOME:
-    raise ArgumentError("multiple chromosomes are not yet supported")
+# Origins and features must lie on chromosomes of the genome
+for o in ORIGINS:
+    if o.chr not in CHROMOSOME_LENGTHS:
+        raise ArgumentError(f"origin {o.name} lies on sequence {o.chr} which does not exist in genome {ARGS.genome}")
+for f in VX_FEATURES:
+    if f.chr not in CHROMOSOME_LENGTHS:
+        raise ArgumentError(f"vx feature {f.name} lies on sequence {f.chr} which does not exist in genome {ARGS.genome}")
 
 # Read abundance data
-ABUNDANCE = pd.read_csv(ARGS.inputfile, delimiter="\t")
+# NOTE: Sequence names are read as strings even if they look like numbers, so that they match the genome
+ABUNDANCE = pd.read_csv(ARGS.inputfile, delimiter="\t", dtype={COLUMNS["seq"]: str})
 ABUNDANCE = ABUNDANCE.rename(columns={ fn: sn for sn, fn in COLUMNS.items() })
 ABUNDANCE_ROWS_PREFILTER = len(ABUNDANCE)
-ABUNDANCE = ABUNDANCE.loc[~pd.isna(ABUNDANCE.x) & ~pd.isna(ABUNDANCE.y_obs) & ~pd.isna(ABUNDANCE.s_obs) & (ABUNDANCE.valid > 0)]
+ABUNDANCE = ABUNDANCE.loc[~pd.isna(ABUNDANCE.x) & ~pd.isna(ABUNDANCE.y_obs) & ~pd.isna(ABUNDANCE.s_obs) & (ABUNDANCE.valid > 0)].copy()
+
+# Determine the chromosome of each data point
+ABUNDANCE_UNKNOWN_SEQ = ~ABUNDANCE.seq.isin(CHROMOSOME_NAMES)
+if ABUNDANCE_UNKNOWN_SEQ.any():
+    unknown = ", ".join(sorted(set(ABUNDANCE.seq[ABUNDANCE_UNKNOWN_SEQ].astype(str))))
+    if SINGLE_CHROMOSOME is not None:
+        print(f"WARNING: sequence(s) {unknown} in {ARGS.inputfile} do not exist in genome {ARGS.genome}, "
+              f"assuming that all data points lie on chromosome {SINGLE_CHROMOSOME}")
+        ABUNDANCE.loc[ABUNDANCE_UNKNOWN_SEQ, "seq"] = SINGLE_CHROMOSOME
+    else:
+        raise ArgumentError(f"sequence(s) {unknown} in {ARGS.inputfile} do not exist in genome {ARGS.genome}")
+ABUNDANCE_CHROMOSOME = pt.tensor(ABUNDANCE.seq.map({ chr: i for i, chr in enumerate(CHROMOSOME_NAMES) }).values,
+                                 dtype=pt.long)
+for chr, l in CHROMOSOME_LENGTHS.items():
+    outside = (ABUNDANCE.seq == chr) & ((ABUNDANCE.x < 0) | (ABUNDANCE.x > l))
+    if outside.any():
+        raise ArgumentError(f"{outside.sum()} data point(s) lie outside the range [0, {l}] of chromosome {chr}")
 
 # Set random seet
 if ARGS.seed is not None:
@@ -326,19 +355,20 @@ if ARGS.seed is not None:
 
 # Create model
 DOUBLINGTIME = 3600 * math.log(2) / ARGS.growthrate
-MODEL = model.VelocityModel.single_chromosome(
-    name=SINGLE_CHROMOSOME, genome_length=CHROMOSOME_LENGTHS[SINGLE_CHROMOSOME], is_circular=True,
-    origins=pt.tensor([o.pos for o in ORIGINS if o.chr == SINGLE_CHROMOSOME], dtype=pt.int32),
-    origin_names=[o.name for o in ORIGINS if o.chr == SINGLE_CHROMOSOME],
-    h_tgrid=pt.arange(start=0, end=DOUBLINGTIME * ARGS.vt_tmax,
-                      step=DOUBLINGTIME * ARGS.vt_timescale / ARGS.vt_resolution,
-                      dtype=pt.float64),
-    g_xranges_l=pt.tensor([f.begin for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.int32),
-    g_xranges_u=pt.tensor([f.end for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.int32),
-    g_delayscale=pt.tensor([f.delayscale for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME], dtype=pt.float64),
-    v0_min=model.dtensor(ARGS.v0_min), v0_max=model.dtensor(ARGS.v0_max)
-)
-CHROMOSOME = MODEL.chromosomes[0]
+MODEL = model.VelocityModel(
+    model.TemporalModel(
+        h_tgrid=pt.arange(start=0, end=DOUBLINGTIME * ARGS.vt_tmax,
+                          step=DOUBLINGTIME * ARGS.vt_timescale / ARGS.vt_resolution,
+                          dtype=pt.float64),
+        v0_min=model.dtensor(ARGS.v0_min), v0_max=model.dtensor(ARGS.v0_max)),
+    [ model.ChromosomeModel(
+        name=chr, length=CHROMOSOME_LENGTHS[chr], is_circular=chr not in ARGS.linear_chromosomes,
+        origins=pt.tensor([o.pos for o in ORIGINS if o.chr == chr], dtype=pt.int32),
+        origin_names=[o.name for o in ORIGINS if o.chr == chr],
+        g_xranges_l=pt.tensor([f.begin for f in VX_FEATURES if f.chr == chr], dtype=pt.int32),
+        g_xranges_u=pt.tensor([f.end for f in VX_FEATURES if f.chr == chr], dtype=pt.int32),
+        g_delayscale=pt.tensor([f.delayscale for f in VX_FEATURES if f.chr == chr], dtype=pt.float64))
+      for chr in CHROMOSOME_NAMES ])
 MODEL.temporal.growthrate[0] = ARGS.growthrate / 3600
 MODEL.temporal.h_cov_function = ARGS.vt_covariance
 MODEL.temporal.h_sigma[0] = ARGS.vt_magnitude
@@ -350,7 +380,9 @@ LOSS = model.VelocityModelLoss(
     y_obs=pt.tensor(ABUNDANCE["y_obs"].values, dtype=pt.float64),
     s_obs=pt.tensor(ABUNDANCE["s_obs"].values, dtype=pt.float64),
     model=MODEL,
-    params=["temporal.v0_log", "chromosomes.0.delay_scaled", "temporal.h_log_raw", "chromosomes.0.g_delta_scaled"])
+    params=(["temporal.v0_log"] + [f"chromosomes.{i}.delay_scaled" for i in range(len(MODEL.chromosomes))] +
+            ["temporal.h_log_raw"] + [f"chromosomes.{i}.g_delta_scaled" for i in range(len(MODEL.chromosomes))]),
+    chromosome=ABUNDANCE_CHROMOSOME)
 
 # Create fit instance
 ALG = fit.FitVelocityModel(MODEL, LOSS)
@@ -362,7 +394,7 @@ print(f"Number of cores: {pt.get_num_threads()}")
 print(f"Perturbation: reduce by {ARGS.perturbation_reduction:.5f} after {ARGS.perturbation_rejects} rejects")
 print(f"Genome configuration:")
 for chr, l in CHROMOSOME_LENGTHS.items():
-    print(f"  chromosome {chr}: {l}bp")
+    print(f"  chromosome {chr}: {l}bp, {'linear' if chr in ARGS.linear_chromosomes else 'circular'}")
     origins = [f"{o.pos+1} ({o.name})" for o in ORIGINS if o.chr == chr]
     print(f"    origins: {', '.join(origins)}")
     print(f"    allow for spatial velocity modulation at:")
@@ -379,6 +411,10 @@ print(f"  v(x) delay scale: {ARGS.vx_delayscale}")
 
 print("Data:")
 print(f"  data points: {len(ABUNDANCE)} ({100.0*len(ABUNDANCE)/ABUNDANCE_ROWS_PREFILTER:.0f}% of {ABUNDANCE_ROWS_PREFILTER} points pre-filtering)")
+if len(CHROMOSOME_NAMES) > 1:
+    for i, chr in enumerate(CHROMOSOME_NAMES):
+        n = (LOSS.chromosome == i).sum().item()
+        print(f"  data points on chromosome {chr}: {n}" + (" (WARNING: no data)" if n == 0 else ""))
 print(f"  mean value: {LOSS.y_obs_mean.item():.3f}")
 print(f"  mean weight: {pt.mean(LOSS.weights).item():.3f}")
 
@@ -398,7 +434,7 @@ ALG.optimize_parameters_stochastic(perturb_reduce=ARGS.perturbation_reduction,
 # Compute posterior covariances of parameters
 print("*** COMPUTING POSTERIOR DISTRIBUTIONS")
 COV_V0, COV_V0_PMAP = MODEL.posterior_cov(LOSS, ["temporal.v0_log"])
-COV_HG, COV_HG_PMAP = MODEL.posterior_cov(LOSS, ["temporal.h_log_raw", "chromosomes.0.g_delta_scaled"])
+COV_HG, COV_HG_PMAP = MODEL.posterior_cov(LOSS, ["temporal.h_log_raw"] + [f"chromosomes.{i}.g_delta_scaled" for i in range(len(MODEL.chromosomes))])
 
 # Save results
 print("*** SAVING RESULTS")
@@ -435,12 +471,12 @@ if (ARGS.out_abundance is not None) and (ARGS.out_abundance != ""):
         # Get model predictions
         p_pred, scale = LOSS.abundance_and_scale()
         # Build table
-        slen = len(SINGLE_CHROMOSOME)
+        slen = max(len(chr) for chr in CHROMOSOME_NAMES)
         cols = [ ('chr', f'U{slen}'), ('pos', np.int32), ('y_obs', np.float64), ('y_obs_stderr', np.float64),
                  ('y_pred', np.float64), ('p_pred', np.float64) ]
         fmt = ('%s', '%d', '%.5f', '%.5f', '%.5f', '%.5f' )
         tab = np.zeros(LOSS.x.shape[0], dtype=cols)
-        tab["chr"] = SINGLE_CHROMOSOME
+        tab["chr"] = ABUNDANCE["seq"].values
         tab["pos"] = LOSS.x
         tab["y_obs"] = ABUNDANCE["y_obs"]
         tab["y_obs_stderr"] = ABUNDANCE["s_obs"]
@@ -484,7 +520,9 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
     f = None
     try:
         # Check that we agree on the order of the genomic features...
-        assert all(CHROMOSOME.g_xranges_l == pt.tensor(list([f.begin for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME]), dtype=pt.int32))
+        features = [f for c in MODEL.chromosomes for f in VX_FEATURES if f.chr == c.name]
+        for c in MODEL.chromosomes:
+            assert all(c.g_xranges_l == pt.tensor([f.begin for f in VX_FEATURES if f.chr == c.name], dtype=pt.int32))
         # Build table
         chr_slen = max([len("chr")] + [ len(f.chr) for f in VX_FEATURES ])
         fn_slen = max([len("feature")] + [ len(f.name) for f in VX_FEATURES ])
@@ -492,17 +530,17 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
                  ('name', f'U{fn_slen}'), ('delayscale', np.float64),
                  ('g', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64) ]
         fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f')
-        tab = np.zeros(CHROMOSOME.g_delta.shape[0], dtype=cols)
-        features = list([f for f in VX_FEATURES if f.chr == SINGLE_CHROMOSOME])
+        tab = np.zeros(len(features), dtype=cols)
         tab["chr"] = [f.chr for f in features ]
         tab["begin"] = [f.begin for f in features ]
         tab["end"] = [f.end for f in features ]
         tab["length"] = [f.end - f.begin for f in features ]
         tab["name"] = [f.name for f in features ]
         tab["delayscale"] = [f.delayscale for f in features ]
-        tab["g"] = CHROMOSOME.g.detach().numpy()
-        tab["delay_bp"] = CHROMOSOME.g_delta.detach().numpy() * CHROMOSOME.g_xranges_len.detach().numpy()
-        tab["delay_rel"] = tab["delay_bp"] / CHROMOSOME.length_virtual.detach().numpy()
+        tab["g"] = pt.cat([c.g for c in MODEL.chromosomes]).detach().numpy()
+        tab["delay_bp"] = pt.cat([c.g_delta * c.g_xranges_len for c in MODEL.chromosomes]).detach().numpy()
+        # Delays relative to the time a single replisome would take to replicate the whole genome
+        tab["delay_rel"] = tab["delay_bp"] / MODEL.length_virtual.detach().numpy()
         # Write tab-separated to output file
         f = open_file(ARGS.out_vx_feature_delays, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
@@ -517,19 +555,21 @@ if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
     print(f"Saving velocity profile and replisome trajectories x(t) to {ARGS.out_trajectories}")
     f = None
     try:
-        k = sum([1 for o in ORIGINS if o.chr == SINGLE_CHROMOSOME])
+        # Origins in the order used by the model, MODEL.trajectories() returns two replisomes per origin
+        TRAJ_ORIGINS = [(c, name) for c in MODEL.chromosomes for name in c.origin_names]
+        k = len(TRAJ_ORIGINS)
         # Construct column list and format tuple
         cols = [('t', np.float64), ('v0', np.float64), ('vt', np.float64), ('vt_stderr', np.float64) ]
         fmt = ('%.5f', '%.5f', '%.5f', '%.5f')
-        cols += [ (f"{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
+        cols += [ (f"{name}{d}", np.float64) for c, name in TRAJ_ORIGINS for d in [ "-", "+" ]]
         fmt += ('%d',) * (2*k)
-        cols += [ (f"x.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
+        cols += [ (f"x.{name}{d}", np.float64) for c, name in TRAJ_ORIGINS for d in [ "-", "+" ]]
         fmt += ('%.5f',) * (2*k)
-        cols += [ (f"dx.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
+        cols += [ (f"dx.{name}{d}", np.float64) for c, name in TRAJ_ORIGINS for d in [ "-", "+" ]]
         fmt += ('%.5f',) * (2*k)
-        cols += [ (f"v.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ]]
+        cols += [ (f"v.{name}{d}", np.float64) for c, name in TRAJ_ORIGINS for d in [ "-", "+" ]]
         fmt += ('%.5f',) * (2*k)
-        cols += [ (f"gx.{o.name}{d}", np.float64) for o in ORIGINS if o.chr == SINGLE_CHROMOSOME for d in [ "-", "+" ] ]
+        cols += [ (f"gx.{name}{d}", np.float64) for c, name in TRAJ_ORIGINS for d in [ "-", "+" ] ]
         fmt += ('%.5f',) * (2*k)
         # Fill columns, v(t)=v0*h(t) first
         tab = np.zeros(MODEL.temporal.h_tgrid.shape[0], dtype=cols)
@@ -539,16 +579,14 @@ if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
         tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.temporal.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
         # Now fill in x(t), v_r(t)=v0*h(t) / g(x) and g(x) for all replisomes
         tab_state, tab_x, tab_dx, tab_v = MODEL.trajectories(MODEL.temporal.h_tgrid)
-        for o_i, o in enumerate(ORIGINS):
-            if o.chr != SINGLE_CHROMOSOME:
-                continue
+        for o_i, (c, name) in enumerate(TRAJ_ORIGINS):
             for d_i, d in enumerate([ "-", "+" ]):
                 r_i = 2*o_i + d_i
-                tab[f"{o.name}{d}"] =  tab_state[:, r_i].detach().numpy()
-                tab[f"x.{o.name}{d}"] =  tab_x[:, r_i].detach().numpy()
-                tab[f"dx.{o.name}{d}"] =  tab_dx[:, r_i].detach().numpy()
-                tab[f"v.{o.name}{d}"] = tab_v[:, r_i].detach().numpy()
-                tab[f"gx.{o.name}{d}"] = CHROMOSOME.g_fun(tab_x[:, r_i]).detach().numpy()
+                tab[f"{name}{d}"] =  tab_state[:, r_i].detach().numpy()
+                tab[f"x.{name}{d}"] =  tab_x[:, r_i].detach().numpy()
+                tab[f"dx.{name}{d}"] =  tab_dx[:, r_i].detach().numpy()
+                tab[f"v.{name}{d}"] = tab_v[:, r_i].detach().numpy()
+                tab[f"gx.{name}{d}"] = c.g_fun(tab_x[:, r_i]).detach().numpy()
         # Write tab-separated to output file
         f = open_file(ARGS.out_trajectories, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
@@ -569,8 +607,8 @@ if (ARGS.plot_vt is not None) and (ARGS.plot_vt != ""):
     try:
         print(f"Plotting v(t) to {ARGS.plot_vt}")
         with pt.no_grad():
-            x_min = LOSS.x[pt.argmin(LOSS.y_pred())]
-            t_fin = MODEL.temporal.Hinv(MODEL.T(x_min))
+            # Time at which the last observed position (i.e. the one with the lowest abundance) is replicated
+            t_fin = MODEL.temporal.Hinv(MODEL.T(LOSS.x_prep[pt.argmin(LOSS.y_pred())]))
             t_max = max(t_fin, DOUBLINGTIME) * 1.2
 
             plot_t = MODEL.temporal.h_tgrid
@@ -599,11 +637,20 @@ if (ARGS.plot_vt is not None) and (ARGS.plot_vt != ""):
 if (ARGS.plot_abundance is not None) and (ARGS.plot_abundance != ""):
     try:
         print(f"Plotting data and fitted model to {ARGS.plot_abundance}")
+        # One panel per chromosome
         pp.clf()
-        pp.figure(figsize=(2.5, 2.0))
-        pp.plot(LOSS.x.detach().numpy(), LOSS.y_obs.detach().numpy(), marker="x", markersize=0.25, linestyle="", color="grey")
-        pp.plot(LOSS.x.detach().numpy(), LOSS.y_pred().detach().numpy(), linewidth=0.5, color="navy")
-        pp.tight_layout()
+        n = len(MODEL.chromosomes)
+        fig, axes = pp.subplots(1, n, figsize=(2.5 * n, 2.0), squeeze=False, sharey=True)
+        with pt.no_grad():
+            plot_y_pred = LOSS.y_pred()
+        for i, c in enumerate(MODEL.chromosomes):
+            sel = LOSS.chromosome == i
+            ax = axes[0, i]
+            ax.plot(LOSS.x[sel].numpy(), LOSS.y_obs[sel].numpy(), marker="x", markersize=0.25, linestyle="", color="grey")
+            ax.plot(LOSS.x[sel].numpy(), plot_y_pred[sel].numpy(), linewidth=0.5, color="navy")
+            if n > 1:
+                ax.set_title(c.name, fontsize="small")
+        fig.tight_layout()
         pp.savefig(ARGS.plot_abundance, dpi=300, bbox_inches='tight')
     except Exception as e:
         print(f"ERROR: Failed to save {ARGS.plot_abundance}: {e}")

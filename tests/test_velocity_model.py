@@ -472,3 +472,35 @@ def test_multi_chromosome_posterior_includes_all_priors():
         i, l = pmap[name], block.shape[0]
         expected[i:i + l, i:i + l] = block
     torch.testing.assert_close(u - u0, expected, rtol=1e-10, atol=1e-10)
+
+
+def test_g_prior_scaled_by_genome_length():
+    """ Expected delays at g ranges are relative to the whole genome, and joining a genome preserves g_delta """
+    # Give every g range of the genome scenarios an expected delay
+    genome = {name: Scenario(**{**s.__dict__, "g_delayscale": [0.01 * (i + 1) for i in range(len(s.g_xranges_l))]})
+              for name, s in GENOME_SCENARIOS.items()}
+    scenarios = list(genome.values())
+    chromosomes = [make_chromosome(s, name) for name, s in genome.items()]
+    temporal = TemporalModel(dtensor(scenarios[0].h_tgrid), v0_min=dtensor([1.0]), v0_max=dtensor([1000.0]))
+    for s, c in zip(scenarios, chromosomes):
+        set_parameters(s, temporal, c)
+        c.g_delta_scaled = nn.Parameter(c.g_delta_scaled)
+    g_delta_before = [c.g_delta.detach().clone() for c in chromosomes]
+    params_before = [c.g_delta_scaled for c in chromosomes]
+    m = VelocityModel(temporal, chromosomes)
+    total = sum(s.genome_length for s in scenarios)
+    assert m.length.item() == total
+    for s, c, g_delta, p in zip(scenarios, chromosomes, g_delta_before, params_before):
+        assert c.reference_length.item() == total
+        torch.testing.assert_close(c.g_delta_prefactor, dtensor(s.g_delayscale) * total / c.g_xranges_len.double())
+        torch.testing.assert_close(c.g_delta, g_delta)
+        assert c.g_delta_scaled is p
+    torch.testing.assert_close(m.length_virtual, sum(c.length_virtual for c in chromosomes))
+
+
+def test_g_prior_single_chromosome_unchanged():
+    """ For a single chromosome, the genome is the chromosome, so the prior does not change """
+    s = next(s for s in SCENARIOS if s.g_delayscale is not None)
+    c = make_model(s).chromosomes[0]
+    expected = dtensor(s.g_delayscale) * s.genome_length / c.g_xranges_len.double()
+    assert torch.equal(c.g_delta_prefactor, expected)
