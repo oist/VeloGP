@@ -545,14 +545,8 @@ class VelocityModel(nn.Module):
         """
 
         assert all(t >= self.h_tgrid[0])
-        # Compute H(t) on the (fixed) grid h_tgrid (we could call H here, but this is faster)
-        # NOTE: We required h_tgrid to contain +inf in its last element, since that guarantees that
-        #       the lookup below always finds at least one grid cell where u < H.
-        h_tgrid_augmented = cat((self.h_tgrid, dtensor([float('inf')])))
-        # Find i where h_tgrid[i] <= u but h_tgrid[i+1] > u
-        with no_grad():
-            lt = t[None, ...] < h_tgrid_augmented[(...,) + (None,) * t.dim()]
-            return argmax(lt.view(torch.int8), dim=0) - tensor([1])
+        # Find i where h_tgrid[i] <= t but h_tgrid[i+1] > t
+        return self.grid_index(self.h_tgrid, t)
 
     @staticmethod
     def grid_index(grid: Tensor, x: Tensor) -> Tensor:
@@ -704,9 +698,7 @@ class VelocityModel(nn.Module):
         H = cat((dtensor([0.0]), torch.cumsum(self.h_tgrid_len[:-1] * exp(h_log[:-1]), dim=0),
                  dtensor([float('inf')])))
         # Find t_i where H(t_i) <= u but H(t_(i+1)) > u
-        with no_grad():
-            lt = u[None, ...] < H[(...,) + (None,) * u.dim()]
-            idx = argmax(lt.view(torch.int8), dim=0) - tensor([1])
+        idx = self.grid_index(H, u)
         # Within [t_i, t_(i+1)] the function H is piece-wise linear, i.e.
         #   H(t) = H(t_i) + (t - t_i) * exp(h[i])
         # and its inverse is thus
