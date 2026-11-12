@@ -235,6 +235,8 @@ for gff_filename in ARGS.gff:
                 f_names = [ f.id ]
                 if "Name" in f.qualifiers:
                     f_names.extend(f.qualifiers["Name"])
+                # The ID and Name(s) of a feature are often identical, but must count only once below
+                f_names = list(dict.fromkeys(f_names))
                 # Resolve feature names, add all features of requested types
                 f_matching_feature_names = [ fn for fn in f_names if fn in ARGS.vx_feature_names]
                 if (f.type in ARGS.vx_feature_types) or len(f_matching_feature_names) > 0:
