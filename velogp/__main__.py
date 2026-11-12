@@ -207,7 +207,7 @@ for origin in ARGS.origins:
     elif chr not in CHROMOSOME_LENGTHS:
         raise ArgumentError(f"origin {origin} lies on chromosome {chr} which does not exist in genome {ARGS.genome}")
     if (pos < 1) or (pos > CHROMOSOME_LENGTHS[chr]):
-        raise ArgumentError(f"origin {origin} lies outside the range of chromosome {chr} [1, {CHROMOSOME_LENGTHS[chr]}])")
+        raise ArgumentError(f"origin {origin} lies outside the range of chromosome {chr} [1, {CHROMOSOME_LENGTHS[chr]}]")
     # NOTE: Locations on the command-line are one-based
     ORIGINS.append(Origin(chr=chr, pos=pos-1, name=origin))
 ORIGINS_NAMES_TO_BE_RESOLVED : Set[str] = ORIGINS_NAMES.copy()
