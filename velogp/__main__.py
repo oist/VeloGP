@@ -25,6 +25,15 @@ from . import fit
 class ArgumentError(Exception):
     pass
 
+# Report invalid arguments (e.g. origins or features that cannot be resolved) like argparse does,
+# i.e. as an error message without a traceback
+def excepthook(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, ArgumentError):
+        print(f"VeloGP: error: {exc_value}", file=sys.stderr)
+        sys.exit(2)
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+sys.excepthook = excepthook
+
 class SplitAndAdd(argparse.Action):
     def __call__(self, parser, namespace, values, option_string=None):
         if isinstance(values, str):
