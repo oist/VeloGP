@@ -21,6 +21,7 @@ import matplotlib.pyplot as pp
 
 from . import model
 from . import fit
+from . import errormodel
 
 class ArgumentError(Exception):
     pass
@@ -52,6 +53,13 @@ def open_file(filename, mode):
         return bz2.open(filename, mode)
     else:
         return open(filename, mode)
+
+def window_index(seq: np.ndarray, pos: np.ndarray) -> np.ndarray:
+    """ Number windows consecutively in order of position within each chromosome """
+    order = np.lexsort((np.asarray(pos), np.asarray(seq)))
+    index = np.empty(len(order), dtype=np.int64)
+    index[order] = np.arange(len(order))
+    return index
 
 @dataclass
 class Feature:
@@ -98,6 +106,13 @@ parser.add_argument("--plot-abundance", metavar="filename",
                     help="output file for a plot of the input abundances and fitted model")
 parser.add_argument("--plot-vt", metavar="filename",
                     help="output file for a plot of the velocity as a function of time")
+parser.add_argument("--plot-error-model", metavar="filename",
+                    help="output file for a plot of the neighbour scatter of the abundances and the fitted error model "
+                         "(the error model is fitted for this plot even without --error-model)")
+parser.add_argument("--error-model", default=False, action="store_true",
+                    help="account for overdispersion: estimate d in the error model stderr^2 = q^2 + d * abundance^2 "
+                         "(q = std. error from the input) from the scatter between adjacent windows, and use the "
+                         "resulting std. errors instead of q")
 parser.add_argument("--growthrate", default=1.0, type=float, metavar="lambda",
                     help="growthrate of sequenced population [1/hour]")
 parser.add_argument("--origins", default=None, metavar="origin,origin,...", action=SplitAndAdd,
@@ -369,7 +384,28 @@ for f in VX_FEATURES:
 ABUNDANCE = pd.read_csv(ARGS.inputfile, delimiter="\t", dtype={COLUMNS["seq"]: str})
 ABUNDANCE = ABUNDANCE.rename(columns={ fn: sn for sn, fn in COLUMNS.items() })
 ABUNDANCE_ROWS_PREFILTER = len(ABUNDANCE)
+# Number windows before filtering, so that the error model can tell which of the remaining windows are adjacent
+ABUNDANCE["window"] = window_index(ABUNDANCE.seq.astype(str).values, ABUNDANCE.x.values)
 ABUNDANCE = ABUNDANCE.loc[~pd.isna(ABUNDANCE.x) & ~pd.isna(ABUNDANCE.y_obs) & ~pd.isna(ABUNDANCE.s_obs) & (ABUNDANCE.valid > 0)].copy()
+
+# Fit the overdispersion error model on the remaining windows, using only pairs of adjacent windows that both remain
+ERROR_MODEL = None
+if ARGS.error_model or ARGS.plot_error_model:
+    try:
+        ERROR_MODEL = errormodel.fit(seq=ABUNDANCE.seq.astype(str).values, window=ABUNDANCE.window.values,
+                                     y=ABUNDANCE.y_obs.values, q=ABUNDANCE.s_obs.values)
+    except ValueError as e:
+        raise ArgumentError(f"unable to fit error model: {e}")
+    # Plot right away, since the plot only depends on the input data
+    if ARGS.plot_error_model:
+        print(f"Plotting error model to {ARGS.plot_error_model}")
+        try:
+            errormodel.plot(ARGS.plot_error_model, ERROR_MODEL, xlabel=COLUMNS["y_obs"], qlabel=COLUMNS["s_obs"])
+        except Exception as e:
+            print(f"ERROR: Failed to save {ARGS.plot_error_model}: {e}")
+    if ARGS.error_model:
+        ABUNDANCE["s_obs_poisson"] = ABUNDANCE.s_obs
+        ABUNDANCE["s_obs"] = ERROR_MODEL.stderr(ABUNDANCE.y_obs.values, ABUNDANCE.s_obs.values)
 
 # Determine the chromosome of each data point
 ABUNDANCE_UNKNOWN_SEQ = ~ABUNDANCE.seq.isin(CHROMOSOME_NAMES)
@@ -456,6 +492,12 @@ if len(CHROMOSOME_NAMES) > 1:
         n = (LOSS.chromosome == i).sum().item()
         print(f"  data points on chromosome {chr}: {n}" + (" (WARNING: no data)" if n == 0 else ""))
 print(f"  mean value: {LOSS.y_obs_mean.item():.3f}")
+if ERROR_MODEL is not None:
+    print(f"  error model stderr^2 = q^2 + d * abundance^2 {'(used)' if ARGS.error_model else '(NOT used, no --error-model)'}:")
+    print(f"    fitted on {ERROR_MODEL.n} pairs of adjacent windows")
+    print(f"    overdispersion d: {ERROR_MODEL.d:.4g} (relative std. error sqrt(d) = {math.sqrt(ERROR_MODEL.d):.4g})")
+    print(f"    mean pair variance / q^2: {ERROR_MODEL.mean_ratio_poisson:.3f}, "
+          f"/ (q^2 + d * abundance^2): {ERROR_MODEL.mean_ratio_model:.3f}")
 print(f"  mean weight: {pt.mean(LOSS.weights).item():.3f}")
 
 #print("*** COMPILING MODELS")
