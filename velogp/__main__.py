@@ -386,7 +386,8 @@ ABUNDANCE = ABUNDANCE.rename(columns={ fn: sn for sn, fn in COLUMNS.items() })
 ABUNDANCE_ROWS_PREFILTER = len(ABUNDANCE)
 # Number windows before filtering, so that the error model can tell which of the remaining windows are adjacent
 ABUNDANCE["window"] = window_index(ABUNDANCE.seq.astype(str).values, ABUNDANCE.x.values)
-ABUNDANCE = ABUNDANCE.loc[~pd.isna(ABUNDANCE.x) & ~pd.isna(ABUNDANCE.y_obs) & ~pd.isna(ABUNDANCE.s_obs) & (ABUNDANCE.valid > 0)].copy()
+# NOTE: A std. error of zero (e.g. for a window without any reads) would give the data point infinite weight
+ABUNDANCE = ABUNDANCE.loc[~pd.isna(ABUNDANCE.x) & (ABUNDANCE.y_obs > 0) & (ABUNDANCE.s_obs > 0) & (ABUNDANCE.valid > 0)].copy()
 
 # Fit the overdispersion error model on the remaining windows, using only pairs of adjacent windows that both remain
 ERROR_MODEL = None
@@ -498,7 +499,7 @@ if ERROR_MODEL is not None:
     print(f"    overdispersion d: {ERROR_MODEL.d:.4g} (relative std. error sqrt(d) = {math.sqrt(ERROR_MODEL.d):.4g})")
     print(f"    mean pair variance / q^2: {ERROR_MODEL.mean_ratio_poisson:.3f}, "
           f"/ (q^2 + d * abundance^2): {ERROR_MODEL.mean_ratio_model:.3f}")
-print(f"  mean weight: {pt.mean(LOSS.weights).item():.3f}")
+print(f"  mean weight: {pt.mean(LOSS.weights).item():.4g}")
 
 #print("*** COMPILING MODELS")
 #MODEL.compile()
