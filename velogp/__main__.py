@@ -581,12 +581,19 @@ if (ARGS.out_vt is not None) and (ARGS.out_vt != ""):
     f = None
     try:
         # Build table
-        cols = [('t', np.float64), ('vt', np.float64), ('vt_stderr', np.float64)]
-        fmt = ('%.5f', '%.5f', '%.5f')
+        cols = [('t', np.float64), ('vt', np.float64), ('vt_stderr', np.float64), ('nforks', np.int32),
+                ('replicationtime', np.float64)]
+        fmt = ('%.5f', '%.5f', '%.5f', '%d', '%.5f')
         tab = np.zeros(MODEL.temporal.h_tgrid.shape[0], dtype=cols)
         tab["t"] = MODEL.temporal.h_tgrid
         tab["vt"] = MODEL.temporal.v_t(MODEL.temporal.h_tgrid).detach()
         tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.temporal.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
+        with pt.no_grad():
+            # Number of active replisomes (state 1, see ChromosomeModel.trajectories())
+            tab_state, _, _, _ = MODEL.trajectories(MODEL.temporal.h_tgrid)
+            tab["nforks"] = pt.sum(tab_state == 1, dim=-1).numpy()
+            # Duration of the replication cycle, i.e. the time after which no replisome is active anymore
+            tab["replicationtime"] = MODEL.completion_time().item()
         # Write tab-separated to output file
         f = open_file(ARGS.out_vt, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
@@ -650,8 +657,9 @@ if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
         TRAJ_ORIGINS = [(c, name) for c in MODEL.chromosomes for name in c.origin_names]
         k = len(TRAJ_ORIGINS)
         # Construct column list and format tuple
-        cols = [('t', np.float64), ('v0', np.float64), ('vt', np.float64), ('vt_stderr', np.float64) ]
-        fmt = ('%.5f', '%.5f', '%.5f', '%.5f')
+        cols = [('t', np.float64), ('v0', np.float64), ('vt', np.float64), ('vt_stderr', np.float64),
+                ('replicationtime', np.float64) ]
+        fmt = ('%.5f', '%.5f', '%.5f', '%.5f', '%.5f')
         cols += [ (f"{name}{d}", np.float64) for c, name in TRAJ_ORIGINS for d in [ "-", "+" ]]
         fmt += ('%d',) * (2*k)
         cols += [ (f"x.{name}{d}", np.float64) for c, name in TRAJ_ORIGINS for d in [ "-", "+" ]]
@@ -668,6 +676,9 @@ if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
         tab["v0"] = MODEL.temporal.v0.detach().numpy()
         tab["vt"] = MODEL.temporal.v_t(MODEL.temporal.h_tgrid).detach().numpy()
         tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.temporal.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
+        # Duration of the replication cycle, i.e. the time after which no replisome is active anymore
+        with pt.no_grad():
+            tab["replicationtime"] = MODEL.completion_time().item()
         # Now fill in x(t), v_r(t)=v0*h(t) / g(x) and g(x) for all replisomes
         tab_state, tab_x, tab_dx, tab_v = MODEL.trajectories(MODEL.temporal.h_tgrid)
         for o_i, (c, name) in enumerate(TRAJ_ORIGINS):
