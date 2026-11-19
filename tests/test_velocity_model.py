@@ -26,6 +26,7 @@ Run with `python -m pytest` from the repository root.
 from __future__ import annotations
 
 import bisect
+import dataclasses
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -804,3 +805,92 @@ def test_g_range_forks_without_g_ranges():
     with torch.no_grad():
         forks = make_model(s).g_range_forks()
     assert forks.origin_fwd == [] and forks.enter_fwd.numel() == 0
+
+
+@pytest.mark.parametrize("s", PASSAGE_SCENARIOS, ids=[s.name for s in PASSAGE_SCENARIOS])
+def test_g_range_block_probability_matches_mixture(s: Scenario):
+    """ Blocking with probability p reproduces the abundance just past the range predicted by the delay """
+    m = make_model(s)
+    with torch.no_grad():
+        forks = m.g_range_forks()
+        p_block = m.g_range_block_probability().numpy()
+    lam = m.temporal.growthrate.item()
+    # The base at which the replisomes meet may be attributed to the wrong replisome, allow for one extra base
+    g_max = 1.0 + max(s.g_delta, default=0.0)
+    tol = reference_time_tolerance(s) + g_max / (s.v0 * min(s.h_values)) + 1e-9
+    _, owner = reference_replication_times(s, return_owner=True)
+    assert np.all(np.isnan(p_block) | ((p_block >= 0.0) & (p_block <= 1.0)))
+    for i, (l, u) in enumerate(zip(s.g_xranges_l, s.g_xranges_u)):
+        oi = {+1: forks.oi_fwd[i].item(), -1: forks.oi_rev[i].item()}
+        ref = {d: reference_fork_times(s, oi[d], d, l, u, owner) if oi[d] >= 0 else (np.inf, np.inf)
+               for d in (+1, -1)}
+        # Determine the passing replisome (if any) from the reference
+        passing = [d for d in (+1, -1) if ref[d][1] < ref[-d][0] - tol]
+        if not passing:
+            if all(ref[d][1] > ref[-d][0] + tol for d in (+1, -1)):
+                assert np.isnan(p_block[i]), f"range {i}: replisomes meet inside, but p = {p_block[i]}"
+            continue
+        d = passing[0]
+        assert not np.isnan(p_block[i])
+        # Exit time with delay, exit time without delay (g = 1 on the range), entry time of the opposite replisome
+        t_x = ref[d][1]
+        s_nodelay = dataclasses.replace(s, g_delta=[0.0 if j == i else gd for j, gd in enumerate(s.g_delta)])
+        t_1 = reference_fork_times(s_nodelay, oi[d], d, l, u, owner)[1]
+        t_2 = ref[-d][0]
+        a_mix = p_block[i] * np.exp(-lam * t_2) + (1.0 - p_block[i]) * np.exp(-lam * t_1)
+        # Errors in the times translate into errors of at most lambda times as large in the abundances
+        assert abs(a_mix - np.exp(-lam * t_x)) <= 3 * lam * tol, f"range {i}: mixture {a_mix} != {np.exp(-lam * t_x)}"
+        if s.g_delta[i] == 0.0:
+            assert p_block[i] == 0.0
+
+
+def test_g_range_block_probability_cases():
+    # No delay for g = 1 (each range is passed by a single replisome)
+    s = Scenario("g = 1", 20000, True, [3000, 10000, 16000], h_tgrid=H_TGRID, h_values=H_VARYING,
+                 g_xranges_l=[500, 4000, 12000], g_xranges_u=[1500, 6000, 12500], g_delta=[0.0, 0.0, 0.0])
+    with torch.no_grad():
+        assert torch.all(make_model(s).g_range_block_probability() == 0.0)
+    # Replisomes meeting inside ranges
+    s = next(s for s in PASSAGE_SCENARIOS if s.name.startswith("circular, replisomes meet inside"))
+    with torch.no_grad():
+        assert torch.all(torch.isnan(make_model(s).g_range_block_probability()))
+    # Without opposite replisome, p = 1 - exp(-lambda delay). With constant v, delay = g_delta * length / v0
+    s = next(s for s in PASSAGE_SCENARIOS if s.name.startswith("linear, g ranges at chromosome ends"))
+    s = dataclasses.replace(s, h_tgrid=[0.0], h_values=[1.0])
+    m = make_model(s)
+    with torch.no_grad():
+        p_block = m.g_range_block_probability()
+    lam = m.temporal.growthrate.item()
+    for i in (0, len(s.g_xranges_l) - 1):
+        delay = s.g_delta[i] * (s.g_xranges_u[i] - s.g_xranges_l[i]) / s.v0
+        np.testing.assert_allclose(p_block[i].item(), -np.expm1(-lam * delay), rtol=1e-9)
+
+
+def test_g_range_block_probability_deleted_fork():
+    """ A replisome which never fires counts as missing, i.e. p = 1 - exp(-lambda delay) for the other one """
+    # The reverse replisome of range [9000, 10500) never fires since ori2 at 11000 is replicated passively
+    s = next(s for s in PASSAGE_SCENARIOS if s.name == "linear, all combined")
+    m = make_model(s)
+    with torch.no_grad():
+        p_block = m.g_range_block_probability()
+    lam = m.temporal.growthrate.item()
+    _, owner = reference_replication_times(s, return_owner=True)
+    i, l, u = 1, s.g_xranges_l[1], s.g_xranges_u[1]
+    t_x = reference_fork_times(s, 1, +1, l, u, owner)[1]
+    s_nodelay = dataclasses.replace(s, g_delta=[0.0 if j == i else gd for j, gd in enumerate(s.g_delta)])
+    t_1 = reference_fork_times(s_nodelay, 1, +1, l, u, owner)[1]
+    tol = 2 * reference_time_tolerance(s)
+    assert abs(p_block[i].item() + np.expm1(-lam * (t_x - t_1))) <= lam * tol
+
+
+def test_g_range_block_probability_concatenate_chromosomes():
+    scenarios = [s for s in SCENARIOS if s.name in ("circular, g", "linear, g")]
+    temporal = TemporalModel(dtensor(scenarios[0].h_tgrid), v0_min=dtensor([1.0]), v0_max=dtensor([1000.0]))
+    chromosomes = [make_chromosome(s, f"chr{i}") for i, s in enumerate(scenarios)]
+    m = VelocityModel(temporal, chromosomes)
+    for s, c in zip(scenarios, chromosomes):
+        set_parameters(s, temporal, c)
+    with torch.no_grad():
+        p = m.g_range_block_probability()
+        parts = [c.g_range_block_probability(temporal) for c in chromosomes]
+    assert torch.equal(p.nan_to_num(-1.0), torch.cat(parts).nan_to_num(-1.0))

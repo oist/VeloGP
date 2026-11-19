@@ -1331,6 +1331,47 @@ class ChromosomeModel(nn.Module):
             enter_rev=where(has_rev, temporal.Hinv(u_r_q), nan_),
             exit_rev=where(has_rev, temporal.Hinv(u_r_p), nan_))
 
+    def g_range_block_probability(self, temporal: TemporalModel) -> Tensor:
+        """Returns for each g range the probability p of permanently blocking replisomes equivalent to its delay
+
+        Instead of delaying the replisome passing a g range deterministically, consider a replisome which is blocked
+        permanently at the range with probability p, and passes it without delay with probability 1 - p. A blocked
+        replisome leaves the location just past the range to be replicated by the next replisome coming from the
+        opposite direction (see `GRangeForks`), giving the abundance A = p exp(-lambda t_2) + (1-p) exp(-lambda t_1)
+        at that location. Here t_1 is the exit time without delay, t_2 the entry time of the opposite replisome,
+        and lambda the growth rate. p is chosen such that A equals the abundance exp(-lambda t_x) predicted by the
+        deterministic model, where t_x is the (delayed) exit time, i.e.
+            p = (1 - exp(-lambda (t_x - t_1))) / (1 - exp(-lambda (t_2 - t_1))).
+        Since t_1 <= t_x <= t_2, p lies in [0, 1]. If there is no opposite replisome, t_2 = +inf.
+
+        p is NaN if the two replisomes meet inside the range, since then no replisome passes it, and 0 if the
+        range causes no delay (g = 1).
+
+        :param temporal: The time-dependent part of the model
+        :return: Tensor containing one probability per g range
+        """
+        forks = self.g_range_forks(temporal)
+        lam = temporal.growthrate
+        has_fwd, has_rev = forks.oi_fwd >= 0, forks.oi_rev >= 0
+        inf_ = dtensor(float('inf'))
+        enter_fwd, exit_fwd = where(has_fwd, forks.enter_fwd, inf_), where(has_fwd, forks.exit_fwd, inf_)
+        enter_rev, exit_rev = where(has_rev, forks.enter_rev, inf_), where(has_rev, forks.exit_rev, inf_)
+        # A replisome passes the range if it exits before the other replisome enters, otherwise they meet inside
+        passes_fwd = has_fwd & (exit_fwd <= enter_rev)
+        passes_rev = has_rev & ~passes_fwd & (exit_rev <= enter_fwd)
+        # Entry and (delayed) exit time of the passing replisome, entry time of the opposite one
+        t_enter = where(passes_fwd, enter_fwd, where(passes_rev, enter_rev, 0.0))
+        t_x = where(passes_fwd, exit_fwd, where(passes_rev, exit_rev, 0.0))
+        t_2 = where(passes_fwd, enter_rev, where(passes_rev, enter_fwd, inf_))
+        # Exit time without delay, i.e. with g = 1 on the range
+        t_1 = temporal.Hinv(temporal.H(t_enter) + self.g_xranges_len.double() / temporal.v0)
+        # p = expm1(-lambda (t_x - t_1)) / expm1(-lambda (t_2 - t_1)), expm1 avoids cancellation for small delays.
+        # expm1(-inf) = -1 covers the case of a missing opposite replisome.
+        delay = clamp(t_x - t_1, min=0.0)
+        p = expm1(-lam * delay) / expm1(-lam * (t_2 - t_1))
+        p = where(delay > 0.0, p, 0.0)
+        return where(passes_fwd | passes_rev, p, dtensor(nan))
+
     def prior_gdelta(self, hyperparameter_dependence: bool):
         """The prior log-probability of self.g_delta as a realization of independent Gaussians
 
@@ -1734,6 +1775,15 @@ class VelocityModel(nn.Module):
         indices refer to the origins of the chromosome containing the respective g range.
         """
         return ChromosomeModel.GRangeForks.cat([c.g_range_forks(self.temporal) for c in self.chromosomes])
+
+    def g_range_block_probability(self) -> Tensor:
+        """
+        Returns the blocking probability equivalent to the delay at each g range, see
+        `ChromosomeModel.g_range_block_probability()`
+
+        The g ranges of chromosome `self.chromosomes[i]` follow those of chromosome `self.chromosomes[i-1]`.
+        """
+        return cat([c.g_range_block_probability(self.temporal) for c in self.chromosomes])
 
     def completion_time(self) -> Tensor:
         """

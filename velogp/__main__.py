@@ -639,13 +639,13 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         on_slen = max([len("NA")] + [ len(o) for o in origin_fwd + origin_rev ])
         cols = [ ('chr', f'U{chr_slen}'), ('begin', np.int32), ('end', np.int32), ('length', np.int32),
                  ('name', f'U{fn_slen}'), ('delayscale', np.float64),
-                 ('g', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64),
+                 ('g', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64), ('p_block', np.float64),
                  ('time_s', np.float64), ('delay_s', np.float64),
                  ('origin_forward', f'U{on_slen}'), ('origin_forward_enter', np.float64),
                  ('origin_forward_exit', np.float64),
                  ('origin_reverse', f'U{on_slen}'), ('origin_reverse_enter', np.float64),
                  ('origin_reverse_exit', np.float64) ]
-        fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f', '%.5f', '%.5f',
+        fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f', '%.6g', '%.5f', '%.5f',
                '%s', '%.5f', '%.5f', '%s', '%.5f', '%.5f')
         tab = np.zeros(len(features), dtype=cols)
         tab["chr"] = [f.chr for f in features ]
@@ -665,6 +665,10 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         tab["delay_s"] = delay_s.numpy()
         # Delays relative to the duration of the replication cycle
         tab["delay_rel"] = tab["delay_s"] / cycle_time.item()
+        # Probability of permanently blocking the replisome passing the feature that is equivalent to the delay
+        # (NaN if both replisomes enter the feature), see ChromosomeModel.g_range_block_probability()
+        with pt.no_grad():
+            tab["p_block"] = MODEL.g_range_block_probability().numpy()
         # Times at which these replisomes enter and exit the feature if they didn't stop when meeting the other
         # replisome. For the replisome which replicates the feature these are the actual times, for the other one
         # they are counterfactual, i.e. the times at which it would reach the feature next. If the replisomes meet
