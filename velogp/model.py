@@ -785,25 +785,36 @@ class ChromosomeModel(nn.Module):
         v = temporal.v_t(t) / self.g_fun(x)
         return x, dx, v
 
-    def trajectories(self, temporal: TemporalModel, t: Tensor = None) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-        # Use grid on which h() is defined if no output times are specified
-        if t is None:
-            t = temporal.h_tgrid
-        # Physical origin firing delays
+    @dataclass
+    class Segment:
+        """ The part of a chromosome between two adjacent origins (or an origin and the end of a linear chromosome) """
+        # Indices of the replisomes moving into the segment from the left and from the right (see `trajectories()`)
+        ri_left: int
+        ri_right: int
+        # Whether there is an origin delimiting the segment on the left respectively right
+        has_left: bool
+        has_right: bool
+        # Left and right ends of the segment (origins or chromosome ends) and the delays of the origins
+        o_left: Tensor
+        o_right: Tensor
+        d_left: Tensor | None
+        d_right: Tensor | None
+        # Whether the replisome moving into the segment from the left respectively right is ever started
+        left_fires: bool
+        right_fires: bool
+        # The (physical) time at which the segment is fully replicated
+        t_meet: Tensor
+
+    def segments(self, temporal: TemporalModel) -> List[Segment]:
+        """
+        Returns the segments between adjacent origins, and the times at which they are fully replicated
+
+        :param temporal: The time-dependent part of the model
+        :return: list of segments
+        """
         delay = self.delay(temporal)
-        # Create output tensors, one for replisome positions, or for velocities
         k = 2*numel(self.origins)
-        tab_state = ones(t.shape + (k,), dtype=torch.int32)
-        tab_x = zeros(t.shape + (k,), dtype=torch.float64)
-        tab_dx = zeros(t.shape + (k,), dtype=torch.float64)
-        tab_v = zeros(t.shape + (k,), dtype=torch.float64)
-        for o_i in builtins.range(0, numel(self.origins)):
-            for d_i, d in enumerate([-1, 1]):
-                x, dx, v = self.replisome_position(temporal, t, origin=self.origins[o_i], dir=d, delay=delay[o_i])
-                tab_x[:, 2*o_i + d_i] = x
-                tab_dx[:, 2*o_i + d_i] = dx
-                tab_v[:, 2*o_i + d_i] = v
-        # Determine chromosome meeting points
+        result = []
         # Iterate over pairs of replisomes moving towards one another
         # For the first and last origin, there's a pair that wraps around on circular
         # chromosomes. On linear chromosomes, these chromosomes hit the ends instead of
@@ -830,10 +841,13 @@ class ChromosomeModel(nn.Module):
             o_right = self.origins[oi_right] if has_right else self.length
             d_right = delay[oi_right] if has_right else None
             # Virtual time a single replisome needs to traverse the whole segment between the origins
-            # NOTE: Must be careful on a circular genome with a single origin since G(x, x) == 0
+            # NOTE: Must be careful on a circular genome with a single origin since G(x, x) == 0, the
+            #       segment then comprises the whole chromosome.
             # TODO: This has to be adapted if G(x,o,d) ever becomes direction-dependent.
-            fudge = tensor(1 if self.is_circular and (o_left == o_right).item() else 0, dtype=torch.int32)
-            u_segment = self.G(o_right - fudge, o_left, d=dtensor([1.0])) / temporal.v0
+            if self.is_circular and (o_left == o_right).item():
+                u_segment = self.G_0(self.length) / temporal.v0
+            else:
+                u_segment = self.G(o_right, o_left, d=dtensor([1.0])) / temporal.v0
             # Virtual firing times of the origins
             u_left = temporal.H(d_left) if has_left else None
             u_right = temporal.H(d_right) if has_right else None
@@ -850,6 +864,45 @@ class ChromosomeModel(nn.Module):
                 t_meet = temporal.Hinv(u_left + u_segment)
             else:
                 t_meet = temporal.Hinv(u_right + u_segment)
+            result.append(ChromosomeModel.Segment(ri_left, ri_right, has_left, has_right, o_left, o_right,
+                                                  d_left, d_right, left_fires, right_fires, t_meet))
+        return result
+
+    def completion_time(self, temporal: TemporalModel) -> Tensor:
+        """
+        Returns the (physical) time at which the chromosome is fully replicated
+
+        This is the first time after which no replisome is active, i.e. after which all replisomes are in state 0
+        (never started) or 2 (finished), see `trajectories()`.
+        """
+        return max(stack([seg.t_meet.reshape(()) for seg in self.segments(temporal)]))
+
+    def trajectories(self, temporal: TemporalModel, t: Tensor = None) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        # Use grid on which h() is defined if no output times are specified
+        if t is None:
+            t = temporal.h_tgrid
+        # Physical origin firing delays
+        delay = self.delay(temporal)
+        # Create output tensors, one for replisome positions, or for velocities
+        k = 2*numel(self.origins)
+        tab_state = ones(t.shape + (k,), dtype=torch.int32)
+        tab_x = zeros(t.shape + (k,), dtype=torch.float64)
+        tab_dx = zeros(t.shape + (k,), dtype=torch.float64)
+        tab_v = zeros(t.shape + (k,), dtype=torch.float64)
+        for o_i in builtins.range(0, numel(self.origins)):
+            for d_i, d in enumerate([-1, 1]):
+                x, dx, v = self.replisome_position(temporal, t, origin=self.origins[o_i], dir=d, delay=delay[o_i])
+                tab_x[:, 2*o_i + d_i] = x
+                tab_dx[:, 2*o_i + d_i] = dx
+                tab_v[:, 2*o_i + d_i] = v
+        # Determine chromosome meeting points, see segments()
+        for seg in self.segments(temporal):
+            ri_left, ri_right = seg.ri_left, seg.ri_right
+            has_left, has_right = seg.has_left, seg.has_right
+            o_left, o_right = seg.o_left, seg.o_right
+            d_left, d_right = seg.d_left, seg.d_right
+            left_fires, right_fires = seg.left_fires, seg.right_fires
+            t_meet = seg.t_meet
             # Before replisome creation (or forever, if it is never created),
             # state = 0, position = origin, distance = 0.0, v = nan
             if has_left:
@@ -1541,6 +1594,15 @@ class VelocityModel(nn.Module):
         """
         r = [c.g_range_passage_times(self.temporal) for c in self.chromosomes]
         return tuple(cat(parts) for parts in zip(*r))
+
+    def completion_time(self) -> Tensor:
+        """
+        Returns the (physical) time at which the whole genome is replicated, i.e. the duration of the replication cycle
+
+        Times are measured relative to the firing of the first origin of the genome (see `clamp_parameters()`), so
+        this is the latest time at which a chromosome is fully replicated, see `ChromosomeModel.completion_time()`.
+        """
+        return max(stack([c.completion_time(self.temporal) for c in self.chromosomes]))
 
     def v_t_posterior_stderr(self, t: Tensor,
                              loss: VelocityModelLoss | None = None,

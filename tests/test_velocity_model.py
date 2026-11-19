@@ -601,3 +601,35 @@ def test_g_range_passage_times_concatenate_chromosomes():
         parts = [c.g_range_passage_times(temporal) for c in chromosomes]
     assert torch.equal(time, torch.cat([p[0] for p in parts]))
     assert torch.equal(delay, torch.cat([p[1] for p in parts]))
+
+
+@pytest.mark.parametrize("s", SCENARIOS, ids=[s.name for s in SCENARIOS])
+def test_completion_time(s: Scenario):
+    """ The completion time is the latest replication time, after which no replisome is active anymore """
+    m = make_model(s)
+    with torch.no_grad():
+        c = m.completion_time().item()
+        # The latest replication time of any base pair lies within one base pair of the completion time
+        t_rep = m.temporal.Hinv(m.T(model_positions(s)))
+        assert t_rep.max().item() <= c + 1e-9
+        assert t_rep.max().item() >= c - reference_time_tolerance(s)
+        # No replisome is active after the completion time, but some are active just before
+        t = torch.cat((torch.linspace(0.0, c, 200, dtype=torch.float64)[:-1],
+                       torch.linspace(c, c + 100.0, 50, dtype=torch.float64)[1:]))
+        state, _, _, _ = m.trajectories(t)
+    after = t > c
+    assert torch.all(state[after] != 1)
+    assert torch.any(state[~after][-1] == 1)
+    # Replisomes that were started have all finished, those that never start stay in state 0
+    assert torch.all(state[after] == state[after][0])
+
+
+def test_completion_time_multi_chromosome():
+    scenarios = [s for s in SCENARIOS if s.name in ("circular, constant v", "linear, delays")]
+    temporal = TemporalModel(dtensor(scenarios[0].h_tgrid), v0_min=dtensor([1.0]), v0_max=dtensor([1000.0]))
+    chromosomes = [make_chromosome(s, f"chr{i}") for i, s in enumerate(scenarios)]
+    m = VelocityModel(temporal, chromosomes)
+    for s, c in zip(scenarios, chromosomes):
+        set_parameters(s, temporal, c)
+    with torch.no_grad():
+        assert m.completion_time().item() == max(c.completion_time(temporal).item() for c in chromosomes)
