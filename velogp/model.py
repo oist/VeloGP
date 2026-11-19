@@ -1039,25 +1039,13 @@ class ChromosomeModel(nn.Module):
         """
         x_prep = x if isinstance(x, ChromosomeModel.X) else self.prepare_input(x)
         delay_virtual = temporal.H(self.delay(temporal))
-        # Evaluate G(x, o_l, +1) and G(x, o_r, -1), see G(), using the pre-processed input
-        g, G = self.g_grid_values()
-        G_0_x = G[x_prep.g_index] + x_prep.g_offset * g[x_prep.g_index]
-        G_0_origins = self.G_0(self.origins)
-        G_0_L = G[-1]
-        G_left = where(x_prep.wrap_left, G_0_L, 0.0) + (G_0_x - G_0_origins[x_prep.origin_index_left])
-        G_right = where(x_prep.wrap_right, G_0_L, 0.0) - (G_0_x - G_0_origins[x_prep.origin_index_right])
-        t_left = delay_virtual[x_prep.origin_index_left] + G_left / temporal.v0
-        t_right = delay_virtual[x_prep.origin_index_right] + G_right / temporal.v0
+        t_left, t_right = self.fork_arrival_times(x_prep, temporal, delay_virtual)
         # Virtual times at which the replisomes of the adjacent origins o_(i-1) and o_(i+1) reach origin o_i
         origins_prev, delay_virtual_prev = roll(self.origins, 1), roll(delay_virtual, 1)
         origins_next, delay_virtual_next = roll(self.origins, -1), roll(delay_virtual, -1)
         arrival_from_prev = delay_virtual_prev + self.G(self.origins, origins_prev, dtensor([+1.0])) / temporal.v0
         arrival_from_next = delay_virtual_next + self.G(self.origins, origins_next, dtensor([-1.0])) / temporal.v0
         if not self.is_circular:
-            # surrounding_origins() returns origin index 0 if there is no origin to the left or right on a
-            # linear chromosome. Exclude these, otherwise G() is negative and T(x) precedes the origin firing time.
-            t_left = where(x_prep.has_left, t_left, dtensor(float('inf')))
-            t_right = where(x_prep.has_right, t_right, dtensor(float('inf')))
             # The first origin has no left neighbour and the last origin no right neighbour on a linear chromosome
             is_first = arange(numel(self.origins)) == 0
             is_last = arange(numel(self.origins)) == numel(self.origins) - 1
@@ -1067,6 +1055,97 @@ class ChromosomeModel(nn.Module):
         # Locations that coincide with an origin are also replicated by the replisomes of the adjacent origins
         t = minimum(t_left, t_right)
         return where(x_prep.at_origin, minimum(t, arrival_from_adjacent[x_prep.origin_index_left]), t)
+
+    def fork_arrival_times(self, x_prep: X, temporal: TemporalModel,
+                           delay_virtual: Tensor | None = None) -> Tuple[Tensor, Tensor]:
+        """Returns the virtual times at which the replisomes of the surrounding origins reach x
+
+        These are H(Delta_l) + int_(o_l)^x g(u)/v0 du for the replisome moving rightwards from the left origin o_l,
+        and H(Delta_r) + int_x^(o_r) g(u)/v0 du for the replisome moving leftwards from the right origin o_r, see
+        `T()`. On linear chromosomes, the time is +inf if there is no origin to the left respectively right of x.
+
+        :param x_prep: Pre-processed genomic locations, see `prepare_input()`
+        :param temporal: The time-dependent part of the model
+        :param delay_virtual: The virtual origin firing times H(Delta), computed if not provided
+        :return: Pair (t_left, t_right) of virtual arrival times with the same shape as x
+        """
+        if delay_virtual is None:
+            delay_virtual = temporal.H(self.delay(temporal))
+        # Evaluate G(x, o_l, +1) and G(x, o_r, -1), see G(), using the pre-processed input
+        g, G = self.g_grid_values()
+        G_0_x = G[x_prep.g_index] + x_prep.g_offset * g[x_prep.g_index]
+        G_0_origins = self.G_0(self.origins)
+        G_0_L = G[-1]
+        G_left = where(x_prep.wrap_left, G_0_L, 0.0) + (G_0_x - G_0_origins[x_prep.origin_index_left])
+        G_right = where(x_prep.wrap_right, G_0_L, 0.0) - (G_0_x - G_0_origins[x_prep.origin_index_right])
+        t_left = delay_virtual[x_prep.origin_index_left] + G_left / temporal.v0
+        t_right = delay_virtual[x_prep.origin_index_right] + G_right / temporal.v0
+        if not self.is_circular:
+            # surrounding_origins() returns origin index 0 if there is no origin to the left or right on a
+            # linear chromosome. Exclude these, otherwise G() is negative and T(x) precedes the origin firing time.
+            t_left = where(x_prep.has_left, t_left, dtensor(float('inf')))
+            t_right = where(x_prep.has_right, t_right, dtensor(float('inf')))
+        return t_left, t_right
+
+    def g_range_passage_times(self, temporal: TemporalModel) -> Tuple[Tensor, Tensor]:
+        """Returns the (physical) time replisomes spend in each g range, and the part of it caused by g > 1
+
+        For g range i = [x_0, x_1) these are
+            time_i  = int_(x_0)^(x_1) g(x) / v(t(x)) dx,
+            delay_i = int_(x_0)^(x_1) (g(x) - 1) / v(t(x)) dx,
+        where v(t) = v0 * h(t) and t(x) is the (physical) time at which x is replicated. If multiple replisomes
+        replicate parts of the range, their times are summed up.
+
+        Since g(x) = g_i is constant on the range, dt/dx = g_i / v(t) along each replisome trajectory, so time_i is
+        the sum of the times each replisome spends replicating its part of the range, and
+        delay_i = (1 - 1/g_i) * time_i. We split the range at the origins it contains, between them each location
+        is replicated by the replisome of the origin to its left or right, see `T()`. Within such a piece [p,q],
+        the virtual arrival times of both replisomes are linear with slope +/- g_i / v0, the replisomes therefore
+        meet at the point m in [p,q] where these lines intersect. The left replisome replicates [p,m], the right
+        one [m,q].
+
+        :param temporal: The time-dependent part of the model
+        :return: Pair (time, delay) of tensors containing one entry per g range
+        """
+        n = numel(self.g_xranges_l)
+        if n == 0:
+            return zeros(0, dtype=torch.float64), zeros(0, dtype=torch.float64)
+        # Split the g ranges into pieces [p,q] that contain no origins except at their ends
+        piece_range, piece_p, piece_q = [], [], []
+        origins = self.origins.tolist()
+        for i, (l, u) in enumerate(zip(self.g_xranges_l.tolist(), self.g_xranges_u.tolist())):
+            points = [l] + [o for o in origins if l < o < u] + [u]
+            for p, q in zip(points[:-1], points[1:]):
+                piece_range.append(i)
+                piece_p.append(p)
+                piece_q.append(q)
+        piece_range = tensor(piece_range, dtype=torch.int64)
+        p = tensor(piece_p, dtype=torch.int32)
+        q = tensor(piece_q, dtype=torch.int32)
+        # Virtual arrival times of the replisome coming from the left at p and of the one coming from the right
+        # at q. For p (respectively q) the origin to the left (right) is the same as for the interior of [p,q]
+        # since there are no origins strictly between p and q, and an origin at p (q) is its own surrounding origin.
+        delay_virtual = temporal.H(self.delay(temporal))
+        u_left_p, _ = self.fork_arrival_times(self.prepare_input(p), temporal, delay_virtual)
+        _, u_right_q = self.fork_arrival_times(self.prepare_input(q), temporal, delay_virtual)
+        # Virtual time per base pair within the range
+        g_piece = self.g[piece_range]
+        c = g_piece / temporal.v0
+        # Meeting point m of the two replisomes, clamped to [p,q]. A missing replisome has arrival time +inf,
+        # which moves m to the end of the piece at which that replisome would have entered.
+        p_d, q_d = p.double(), q.double()
+        m = minimum(maximum((p_d + q_d) / 2.0 + (u_right_q - u_left_p) / (2.0 * c), p_d), q_d)
+        len_left, len_right = m - p_d, q_d - m
+        # Physical time each replisome spends in the piece. Replace arrival times of replisomes that don't enter
+        # the piece by a finite placeholder to avoid inf - inf.
+        u_safe = temporal.h_tgrid[0]
+        u_l = where(len_left > 0, u_left_p, u_safe)
+        u_r = where(len_right > 0, u_right_q, u_safe)
+        time_left = where(len_left > 0, temporal.Hinv(u_l + c * len_left) - temporal.Hinv(u_l), 0.0)
+        time_right = where(len_right > 0, temporal.Hinv(u_r + c * len_right) - temporal.Hinv(u_r), 0.0)
+        time = zeros(n, dtype=torch.float64).index_add(0, piece_range, time_left + time_right)
+        delay = time * self.g_delta / self.g
+        return time, delay
 
     def prior_gdelta(self, hyperparameter_dependence: bool):
         """The prior log-probability of self.g_delta as a realization of independent Gaussians
@@ -1453,6 +1532,15 @@ class VelocityModel(nn.Module):
 
     def sample_prior(self, parameter):
         return self.owner(parameter).sample_prior(parameter)
+
+    def g_range_passage_times(self) -> Tuple[Tensor, Tensor]:
+        """
+        Returns the passage times and delays of all g ranges, see `ChromosomeModel.g_range_passage_times()`
+
+        The g ranges of chromosome `self.chromosomes[i]` follow those of chromosome `self.chromosomes[i-1]`.
+        """
+        r = [c.g_range_passage_times(self.temporal) for c in self.chromosomes]
+        return tuple(cat(parts) for parts in zip(*r))
 
     def v_t_posterior_stderr(self, t: Tensor,
                              loss: VelocityModelLoss | None = None,

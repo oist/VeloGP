@@ -611,8 +611,9 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         fn_slen = max([len("feature")] + [ len(f.name) for f in VX_FEATURES ])
         cols = [ ('chr', f'U{chr_slen}'), ('begin', np.int32), ('end', np.int32), ('length', np.int32),
                  ('name', f'U{fn_slen}'), ('delayscale', np.float64),
-                 ('g', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64) ]
-        fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f')
+                 ('g', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64),
+                 ('time_s', np.float64), ('delay_s', np.float64) ]
+        fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f', '%.5f', '%.5f')
         tab = np.zeros(len(features), dtype=cols)
         tab["chr"] = [f.chr for f in features ]
         tab["begin"] = [f.begin for f in features ]
@@ -624,6 +625,12 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         tab["delay_bp"] = pt.cat([c.g_delta * c.g_xranges_len for c in MODEL.chromosomes]).detach().numpy()
         # Delays relative to the time a single replisome would take to replicate the whole genome
         tab["delay_rel"] = tab["delay_bp"] / MODEL.length_virtual.detach().numpy()
+        # Time replisomes spend passing each feature, int g(x) / v(t(x)) dx, and the part of it caused by
+        # the feature stalling replisomes, int (g(x) - 1) / v(t(x)) dx, where t(x) is the replication time of x
+        with pt.no_grad():
+            time_s, delay_s = MODEL.g_range_passage_times()
+        tab["time_s"] = time_s.numpy()
+        tab["delay_s"] = delay_s.numpy()
         # Write tab-separated to output file
         f = open_file(ARGS.out_vx_feature_delays, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")

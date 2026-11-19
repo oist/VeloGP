@@ -504,3 +504,100 @@ def test_g_prior_single_chromosome_unchanged():
     c = make_model(s).chromosomes[0]
     expected = dtensor(s.g_delayscale) * s.genome_length / c.g_xranges_len.double()
     assert torch.equal(c.g_delta_prefactor, expected)
+
+
+# Scenarios for g_range_passage_times(), in addition to the scenarios in SCENARIOS that contain g ranges
+PASSAGE_SCENARIOS = [s for s in SCENARIOS if len(s.g_xranges_l) > 0] + [
+    Scenario("circular, replisomes meet inside g range, varying v", 20000, True, [2000, 9000, 15000],
+             h_tgrid=H_TGRID, h_values=H_VARYING,
+             g_xranges_l=[4000, 8000], g_xranges_u=[7000, 10500], g_delta=[1.5, 2.0]),
+    Scenario("circular, g range containing passively replicated origin, varying v", 20000, True,
+             [2000, 9000, 11000], h_tgrid=H_TGRID, h_values=H_VARYING, delay=[0.0, 0.0, 400.0],
+             g_xranges_l=[10500], g_xranges_u=[12000], g_delta=[2.0]),
+    Scenario("circular, g range at chromosome end, varying v", 20000, True, [2000, 9000, 15000],
+             h_tgrid=H_TGRID, h_values=H_VARYING,
+             g_xranges_l=[0, 19000], g_xranges_u=[500, 20000], g_delta=[1.0, 3.0]),
+    Scenario("linear, g ranges at chromosome ends, varying v", 20000, False, [3000, 10000, 16000],
+             h_tgrid=H_TGRID, h_values=H_VARYING, delay=[0.0, 60.0, 10.0],
+             g_xranges_l=[0, 6000, 17000], g_xranges_u=[2000, 7500, 20000], g_delta=[1.0, 2.5, 0.5]),
+]
+
+
+def reference_passage_times(s: Scenario, m: VelocityModel) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Computes int g(x) / v(t(x)) dx and int (g(x) - 1) / v(t(x)) dx over each g range by summing over base pairs
+
+    The replication time of base [x, x+1) is approximated by the mean of the replication times of x and x+1,
+    computed by the model. This is exact except for bases during whose replication h(t) jumps, at which
+    replication times are discontinuous, or at which two replisomes meet.
+
+    :return: Triple (time, delay, tolerance)
+    """
+    def h(t: float) -> float:
+        return s.h_values[bisect.bisect_right(s.h_tgrid, t) - 1]
+
+    time, delay, tol = [], [], []
+    for l, u, d in zip(s.g_xranges_l, s.g_xranges_u, s.g_delta):
+        x = torch.arange(l, u + 1, dtype=torch.int32)
+        with torch.no_grad():
+            t = m.temporal.Hinv(m.T(x)).numpy()
+        t_mid = (t[:-1] + t[1:]) / 2.0
+        v = s.v0 * np.array([h(ti) for ti in t_mid])
+        time.append(np.sum((1.0 + d) / v))
+        delay.append(np.sum(d / v))
+        # Each base at which h(t) jumps (once per replisome), or at which t(x) is discontinuous, contributes an
+        # error of at most the time it takes to replicate a single base
+        n_bad = 2 * len(s.h_tgrid) + sum(1 for o in s.origins if l <= o <= u) + 2
+        tol.append(n_bad * (1.0 + d) / (s.v0 * min(s.h_values)))
+    return np.array(time), np.array(delay), np.array(tol)
+
+
+@pytest.mark.parametrize("s", PASSAGE_SCENARIOS, ids=[s.name for s in PASSAGE_SCENARIOS])
+def test_g_range_passage_times_match_reference(s: Scenario):
+    m = make_model(s)
+    with torch.no_grad():
+        time, delay = (r.numpy() for r in m.g_range_passage_times())
+    time_ref, delay_ref, tol = reference_passage_times(s, m)
+    assert np.all(np.abs(time - time_ref) <= tol), f"time {time} != reference {time_ref} (tol {tol})"
+    assert np.all(np.abs(delay - delay_ref) <= tol), f"delay {delay} != reference {delay_ref} (tol {tol})"
+    # The delay is the fraction 1 - 1/g of the passage time
+    g = 1.0 + np.array(s.g_delta)
+    np.testing.assert_allclose(delay, time * (1.0 - 1.0 / g), rtol=1e-12)
+
+
+@pytest.mark.parametrize("is_circular", [True, False])
+def test_g_range_passage_times_constant_v(is_circular: bool):
+    """ For constant v(t) = v0, the delay is g_delta * length / v0 if a single replisome passes the range """
+    s = Scenario("constant v", 20000, is_circular, [3000, 10000, 16000],
+                 g_xranges_l=[500, 4000, 12000], g_xranges_u=[1500, 6000, 12500], g_delta=[1.0, 0.5, 3.0])
+    m = make_model(s)
+    with torch.no_grad():
+        time, delay = (r.numpy() for r in m.g_range_passage_times())
+    length = np.array(s.g_xranges_u) - np.array(s.g_xranges_l)
+    g_delta = np.array(s.g_delta)
+    np.testing.assert_allclose(delay, g_delta * length / s.v0, rtol=1e-12)
+    np.testing.assert_allclose(time, (1.0 + g_delta) * length / s.v0, rtol=1e-12)
+
+
+def test_g_range_passage_times_no_delay_for_g_one():
+    s = Scenario("g = 1", 20000, True, [2000, 9000, 15000], h_tgrid=H_TGRID, h_values=H_VARYING,
+                 g_xranges_l=[4000, 8000], g_xranges_u=[7000, 10500], g_delta=[0.0, 0.0])
+    m = make_model(s)
+    with torch.no_grad():
+        time, delay = m.g_range_passage_times()
+    assert torch.all(delay == 0.0)
+    assert torch.all(time > 0.0)
+
+
+def test_g_range_passage_times_concatenate_chromosomes():
+    scenarios = [s for s in SCENARIOS if s.name in ("circular, g", "linear, g")]
+    temporal = TemporalModel(dtensor(scenarios[0].h_tgrid), v0_min=dtensor([1.0]), v0_max=dtensor([1000.0]))
+    chromosomes = [make_chromosome(s, f"chr{i}") for i, s in enumerate(scenarios)]
+    m = VelocityModel(temporal, chromosomes)
+    for s, c in zip(scenarios, chromosomes):
+        set_parameters(s, temporal, c)
+    with torch.no_grad():
+        time, delay = m.g_range_passage_times()
+        parts = [c.g_range_passage_times(temporal) for c in chromosomes]
+    assert torch.equal(time, torch.cat([p[0] for p in parts]))
+    assert torch.equal(delay, torch.cat([p[1] for p in parts]))
