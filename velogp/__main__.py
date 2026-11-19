@@ -366,6 +366,21 @@ for f in VX_FEATURES_TENTATIVE:
         f_prev = copy.copy(f)
         VX_FEATURES.append(f_prev)
 
+# Split features at the origins they contain, the model requires that no origin lies strictly inside a feature.
+# Like merging, splitting leaves the delayscale unchanged, i.e. each part gets the delayscale of the feature.
+VX_FEATURES_UNSPLIT, VX_FEATURES = VX_FEATURES, []
+for f in VX_FEATURES_UNSPLIT:
+    cuts = sorted({ o.pos for o in ORIGINS if o.chr == f.chr and f.begin < o.pos < f.end })
+    if not cuts:
+        VX_FEATURES.append(f)
+        continue
+    print(f"Splitting vx feature {f.name} at origin(s) " +
+          ", ".join(o.name for o in ORIGINS if o.chr == f.chr and f.begin < o.pos < f.end))
+    bounds = [f.begin] + cuts + [f.end]
+    for k, (b, e) in enumerate(zip(bounds[:-1], bounds[1:])):
+        VX_FEATURES.append(Feature(chr=f.chr, begin=b, end=e, name=f"{f.name}.{k + 1}",
+                                   delayscale=f.delayscale))
+
 # Check that every chromosome has an origin
 for chr in CHROMOSOME_LENGTHS.keys():
     if len([o for o in ORIGINS if o.chr == chr]) == 0:

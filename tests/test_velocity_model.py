@@ -174,15 +174,15 @@ SCENARIOS = [
     Scenario("circular, g with delayscale", 20000, True, [2000, 9000, 15000],
              g_xranges_l=[500, 4000, 12000], g_xranges_u=[1500, 6000, 12500], g_delta=[1.0, 0.5, 3.0],
              g_delayscale=[0.01, 0.05, 0.02]),
-    Scenario("circular, g range containing an origin", 20000, True, [2000, 9000, 15000],
-             g_xranges_l=[8000], g_xranges_u=[10500], g_delta=[2.0]),
+    Scenario("circular, g ranges ending and starting at an origin", 20000, True, [2000, 9000, 15000],
+             g_xranges_l=[8000, 9000], g_xranges_u=[9000, 10500], g_delta=[1.0, 2.0]),
     Scenario("circular, delays", 20000, True, [2000, 9000, 15000],
              delay=[0.0, 50.0, 180.0]),
     Scenario("circular, passively replicated origin", 20000, True, [2000, 9000, 11000],
              delay=[0.0, 0.0, 400.0]),
     Scenario("circular, all combined", 20000, True, [1000, 7000, 12000, 16000], v0=15.0,
              h_tgrid=H_TGRID, h_values=H_VARYING,
-             g_xranges_l=[3000, 11500, 18000], g_xranges_u=[4000, 12600, 19500], g_delta=[1.5, 0.7, 2.5],
+             g_xranges_l=[3000, 12000, 18000], g_xranges_u=[4000, 12600, 19500], g_delta=[1.5, 0.7, 2.5],
              delay=[30.0, 0.0, 120.0, 260.0]),
     # Linear chromosomes
     Scenario("linear, single origin", 20000, False, [6000],
@@ -510,10 +510,10 @@ def test_g_prior_single_chromosome_unchanged():
 PASSAGE_SCENARIOS = [s for s in SCENARIOS if len(s.g_xranges_l) > 0] + [
     Scenario("circular, replisomes meet inside g range, varying v", 20000, True, [2000, 9000, 15000],
              h_tgrid=H_TGRID, h_values=H_VARYING,
-             g_xranges_l=[4000, 8000], g_xranges_u=[7000, 10500], g_delta=[1.5, 2.0]),
-    Scenario("circular, g range containing passively replicated origin, varying v", 20000, True,
+             g_xranges_l=[4000, 9500], g_xranges_u=[7000, 14000], g_delta=[1.5, 2.0]),
+    Scenario("circular, g range starting at passively replicated origin, varying v", 20000, True,
              [2000, 9000, 11000], h_tgrid=H_TGRID, h_values=H_VARYING, delay=[0.0, 0.0, 400.0],
-             g_xranges_l=[10500], g_xranges_u=[12000], g_delta=[2.0]),
+             g_xranges_l=[11000], g_xranges_u=[12000], g_delta=[2.0]),
     Scenario("circular, g range at chromosome end, varying v", 20000, True, [2000, 9000, 15000],
              h_tgrid=H_TGRID, h_values=H_VARYING,
              g_xranges_l=[0, 19000], g_xranges_u=[500, 20000], g_delta=[1.0, 3.0]),
@@ -547,7 +547,7 @@ def reference_passage_times(s: Scenario, m: VelocityModel) -> tuple[np.ndarray, 
         delay.append(np.sum(d / v))
         # Each base at which h(t) jumps (once per replisome), or at which t(x) is discontinuous, contributes an
         # error of at most the time it takes to replicate a single base
-        n_bad = 2 * len(s.h_tgrid) + sum(1 for o in s.origins if l <= o <= u) + 2
+        n_bad = 2 * len(s.h_tgrid) + 4
         tol.append(n_bad * (1.0 + d) / (s.v0 * min(s.h_values)))
     return np.array(time), np.array(delay), np.array(tol)
 
@@ -563,6 +563,14 @@ def test_g_range_passage_times_match_reference(s: Scenario):
     # The delay is the fraction 1 - 1/g of the passage time
     g = 1.0 + np.array(s.g_delta)
     np.testing.assert_allclose(delay, time * (1.0 - 1.0 / g), rtol=1e-12)
+
+
+@pytest.mark.parametrize("l, u", [(8000, 10500), (8999, 9001)])
+def test_origin_inside_g_range_rejected(l: int, u: int):
+    s = Scenario("origin inside g range", 20000, True, [2000, 9000, 15000],
+                 g_xranges_l=[l], g_xranges_u=[u], g_delta=[1.0])
+    with pytest.raises(ValueError, match="ori1"):
+        make_chromosome(s, "chr")
 
 
 @pytest.mark.parametrize("is_circular", [True, False])
@@ -581,7 +589,7 @@ def test_g_range_passage_times_constant_v(is_circular: bool):
 
 def test_g_range_passage_times_no_delay_for_g_one():
     s = Scenario("g = 1", 20000, True, [2000, 9000, 15000], h_tgrid=H_TGRID, h_values=H_VARYING,
-                 g_xranges_l=[4000, 8000], g_xranges_u=[7000, 10500], g_delta=[0.0, 0.0])
+                 g_xranges_l=[4000, 9500], g_xranges_u=[7000, 14000], g_delta=[0.0, 0.0])
     m = make_model(s)
     with torch.no_grad():
         time, delay = m.g_range_passage_times()

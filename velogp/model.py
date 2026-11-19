@@ -665,6 +665,14 @@ class ChromosomeModel(nn.Module):
             # Check that g_xranges_l[i] < g_xranges_u[i] <= g_xranges_l[i+1]
             assert all(self.g_xranges_l < self.g_xranges_u).detach().item()
             assert all(self.g_xranges_u <= cat((self.g_xranges_l[1:], dtensor([float('inf')])))).detach().item()
+            # Origins must not lie strictly inside a g range (they may coincide with a range's ends). Each g range
+            # thus lies between two adjacent origins and is replicated by at most two replisomes, one coming from
+            # either side, see `g_range_passage_times()`.
+            inside = (self.g_xranges_l[:, None] < self.origins[None, :]) & (self.origins[None, :] < self.g_xranges_u[:, None])
+            if any(inside).item():
+                i, j = (int(k) for k in nonzero(inside)[0])
+                raise ValueError(f"origin {origin_names[j]} at {self.origins[j].item()} lies inside g range "
+                                 f"[{self.g_xranges_l[i].item()}, {self.g_xranges_u[i].item()})")
             self.g_xranges_len = self.g_xranges_u - self.g_xranges_l
             # Grid on which g(x) is defined, i.e. the grid
             # [ l_1, u_1, l_2, u_2, .... ] where l = from g_xranges_l, u = g_xranges_u
@@ -1151,30 +1159,18 @@ class ChromosomeModel(nn.Module):
 
         Since g(x) = g_i is constant on the range, dt/dx = g_i / v(t) along each replisome trajectory, so time_i is
         the sum of the times each replisome spends replicating its part of the range, and
-        delay_i = (1 - 1/g_i) * time_i. We split the range at the origins it contains, between them each location
-        is replicated by the replisome of the origin to its left or right, see `T()`. Within such a piece [p,q],
-        the virtual arrival times of both replisomes are linear with slope +/- g_i / v0, the replisomes therefore
-        meet at the point m in [p,q] where these lines intersect. The left replisome replicates [p,m], the right
-        one [m,q].
+        delay_i = (1 - 1/g_i) * time_i. Since no origin lies strictly inside a g range [p,q] (see `__init__()`),
+        each of its locations is replicated by the replisome of the origin to the left or right of the range, see
+        `T()`. The virtual arrival times of both replisomes are linear with slope +/- g_i / v0 within the range,
+        the replisomes therefore meet at the point m in [p,q] where these lines intersect. The left replisome
+        replicates [p,m], the right one [m,q].
 
         :param temporal: The time-dependent part of the model
         :return: Pair (time, delay) of tensors containing one entry per g range
         """
-        n = numel(self.g_xranges_l)
-        if n == 0:
+        if numel(self.g_xranges_l) == 0:
             return zeros(0, dtype=torch.float64), zeros(0, dtype=torch.float64)
-        # Split the g ranges into pieces [p,q] that contain no origins except at their ends
-        piece_range, piece_p, piece_q = [], [], []
-        origins = self.origins.tolist()
-        for i, (l, u) in enumerate(zip(self.g_xranges_l.tolist(), self.g_xranges_u.tolist())):
-            points = [l] + [o for o in origins if l < o < u] + [u]
-            for p, q in zip(points[:-1], points[1:]):
-                piece_range.append(i)
-                piece_p.append(p)
-                piece_q.append(q)
-        piece_range = tensor(piece_range, dtype=torch.int64)
-        p = tensor(piece_p, dtype=torch.int32)
-        q = tensor(piece_q, dtype=torch.int32)
+        p, q = self.g_xranges_l, self.g_xranges_u
         # Virtual arrival times of the replisome coming from the left at p and of the one coming from the right
         # at q. For p (respectively q) the origin to the left (right) is the same as for the interior of [p,q]
         # since there are no origins strictly between p and q, and an origin at p (q) is its own surrounding origin.
@@ -1182,21 +1178,20 @@ class ChromosomeModel(nn.Module):
         u_left_p, _ = self.fork_arrival_times(self.prepare_input(p), temporal, delay_virtual)
         _, u_right_q = self.fork_arrival_times(self.prepare_input(q), temporal, delay_virtual)
         # Virtual time per base pair within the range
-        g_piece = self.g[piece_range]
-        c = g_piece / temporal.v0
+        c = self.g / temporal.v0
         # Meeting point m of the two replisomes, clamped to [p,q]. A missing replisome has arrival time +inf,
-        # which moves m to the end of the piece at which that replisome would have entered.
+        # which moves m to the end of the range at which that replisome would have entered.
         p_d, q_d = p.double(), q.double()
         m = minimum(maximum((p_d + q_d) / 2.0 + (u_right_q - u_left_p) / (2.0 * c), p_d), q_d)
         len_left, len_right = m - p_d, q_d - m
-        # Physical time each replisome spends in the piece. Replace arrival times of replisomes that don't enter
-        # the piece by a finite placeholder to avoid inf - inf.
+        # Physical time each replisome spends in the range. Replace arrival times of replisomes that don't enter
+        # the range by a finite placeholder to avoid inf - inf.
         u_safe = temporal.h_tgrid[0]
         u_l = where(len_left > 0, u_left_p, u_safe)
         u_r = where(len_right > 0, u_right_q, u_safe)
         time_left = where(len_left > 0, temporal.Hinv(u_l + c * len_left) - temporal.Hinv(u_l), 0.0)
         time_right = where(len_right > 0, temporal.Hinv(u_r + c * len_right) - temporal.Hinv(u_r), 0.0)
-        time = zeros(n, dtype=torch.float64).index_add(0, piece_range, time_left + time_right)
+        time = time_left + time_right
         delay = time * self.g_delta / self.g
         return time, delay
 
