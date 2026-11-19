@@ -104,11 +104,14 @@ def model_positions(s: Scenario) -> torch.Tensor:
     return torch.arange(0, n, dtype=torch.int32)
 
 
-def reference_replication_times(s: Scenario) -> np.ndarray:
+def reference_replication_times(s: Scenario, return_owner: bool = False) -> np.ndarray | tuple[np.ndarray, list]:
     """
     Computes replication times by tracking every replisome with a forward Euler scheme
 
-    :return: array t_rep where t_rep[x] is the (physical) time at which position x is replicated
+    :param return_owner: whether to also return the replisome replicating each position
+    :return: array t_rep where t_rep[x] is the (physical) time at which position x is replicated, plus (if
+    return_owner is true) a list owner where owner[x] is the pair (origin index, direction) of the replisome which
+    replicates x
     """
     L = s.genome_length
     k = len(s.origins)
@@ -121,6 +124,7 @@ def reference_replication_times(s: Scenario) -> np.ndarray:
         return s.h_values[bisect.bisect_right(s.h_tgrid, t) - 1]
 
     t_rep = np.full(L if s.is_circular else L + 1, np.inf)
+    owner = [None] * len(t_rep)
     for i, (o, d) in enumerate(zip(s.origins, s.delays)):
         for direction in (+1, -1):
             # Number of base pairs the replisome travels before reaching the adjacent
@@ -134,16 +138,18 @@ def reference_replication_times(s: Scenario) -> np.ndarray:
                 steps = o - (s.origins[i - 1] if i > 0 else 0)
             # Forward Euler, each step advances the replisome by one base pair
             t, x = float(d), o
-            t_rep[x % L if s.is_circular else x] = min(t_rep[x % L if s.is_circular else x], t)
+            p = x % L if s.is_circular else x
+            if t < t_rep[p]:
+                t_rep[p], owner[p] = t, (i, direction)
             for _ in range(steps):
                 cell = x if direction > 0 else x - 1
                 t += g_bp[cell % L] / (s.v0 * h(t))
                 x += direction
                 p = x % L if s.is_circular else x
                 if t < t_rep[p]:
-                    t_rep[p] = t
+                    t_rep[p], owner[p] = t, (i, direction)
     assert np.all(np.isfinite(t_rep))
-    return t_rep
+    return (t_rep, owner) if return_owner else t_rep
 
 
 def reference_time_tolerance(s: Scenario) -> float:
@@ -520,6 +526,12 @@ PASSAGE_SCENARIOS = [s for s in SCENARIOS if len(s.g_xranges_l) > 0] + [
     Scenario("linear, g ranges at chromosome ends, varying v", 20000, False, [3000, 10000, 16000],
              h_tgrid=H_TGRID, h_values=H_VARYING, delay=[0.0, 60.0, 10.0],
              g_xranges_l=[0, 6000, 17000], g_xranges_u=[2000, 7500, 20000], g_delta=[1.0, 2.5, 0.5]),
+    # Two ranges replicated by the forward and one by the reverse fork. The counterfactual reverse fork crosses
+    # its own range (with the fitted g) and one range replicated by the forward fork (with g = 1) before
+    # reaching the other range replicated by the forward fork, and vice versa.
+    Scenario("circular, counterfactual forks cross other ranges, varying v", 20000, True, [2000, 14000],
+             h_tgrid=H_TGRID, h_values=H_VARYING,
+             g_xranges_l=[3000, 5000, 12000], g_xranges_u=[4000, 6000, 13000], g_delta=[4.0, 3.0, 2.0]),
 ]
 
 
@@ -641,3 +653,154 @@ def test_completion_time_multi_chromosome():
         set_parameters(s, temporal, c)
     with torch.no_grad():
         assert m.completion_time().item() == max(c.completion_time(temporal).item() for c in chromosomes)
+
+
+def reference_fork_times(s: Scenario, origin: int, direction: int, l: int, u: int,
+                         owner: list | None = None) -> tuple[float, float]:
+    """
+    Computes the times at which the replisome of origin `origin` moving in direction `direction` enters and exits
+    the range [l, u], ignoring all other replisomes, by tracking it with a forward Euler scheme (see
+    `reference_replication_times()`). The forward replisome enters at l and exits at u, the reverse one vice versa.
+
+    If `owner` is given (see `reference_replication_times()`), g = 1 is assumed for every base whose far end (in
+    the direction of movement) is replicated by another replisome, i.e. g only applies to the replisome which
+    actually replicates a base.
+    """
+    L = s.genome_length
+    g_bp = np.ones(L)
+    for gl, gu, d in zip(s.g_xranges_l, s.g_xranges_u, s.g_delta):
+        g_bp[gl:gu] = 1.0 + d
+
+    def h(t: float) -> float:
+        return s.h_values[bisect.bisect_right(s.h_tgrid, t) - 1]
+
+    o = s.origins[origin]
+    entry = l if direction > 0 else u
+    steps_entry = ((entry - o) * direction) % L if s.is_circular else (entry - o) * direction
+    assert steps_entry >= 0
+    t, x = float(s.delays[origin]), o
+    times = []
+    for steps in (steps_entry, u - l):
+        for _ in range(steps):
+            cell = x if direction > 0 else x - 1
+            x += direction
+            own = owner is None or owner[x % L if s.is_circular else x] == (origin, direction)
+            t += (g_bp[cell % L] if own else 1.0) / (s.v0 * h(t))
+        times.append(t)
+    return times[0], times[1]
+
+
+@pytest.mark.parametrize("s", PASSAGE_SCENARIOS, ids=[s.name for s in PASSAGE_SCENARIOS])
+def test_g_range_forks_match_reference(s: Scenario):
+    m = make_model(s)
+    with torch.no_grad():
+        forks = m.g_range_forks()
+        time, _ = m.g_range_passage_times()
+    # Closest origins to the left and right of each range
+    fwd, rev = [], []
+    for l, u in zip(s.g_xranges_l, s.g_xranges_u):
+        left = [i for i, o in enumerate(s.origins) if o <= l]
+        right = [i for i, o in enumerate(s.origins) if o >= u]
+        if s.is_circular:
+            left, right = left or [len(s.origins) - 1], right or [0]
+        fwd.append(left[-1] if left else -1)
+        rev.append(right[0] if right else -1)
+    # Replisomes which never fire, i.e. which replicate nothing, count as missing
+    t_rep, owner = reference_replication_times(s, return_owner=True)
+    fwd = [i if i >= 0 and (i, +1) in owner else -1 for i in fwd]
+    rev = [i if i >= 0 and (i, -1) in owner else -1 for i in rev]
+    assert forks.oi_fwd.tolist() == fwd
+    assert forks.oi_rev.tolist() == rev
+    assert forks.origin_fwd == [f"ori{i}" if i >= 0 else None for i in fwd]
+    assert forks.origin_rev == [f"ori{i}" if i >= 0 else None for i in rev]
+    # The base at which the replisomes meet may be attributed to the wrong replisome, allow for one extra base
+    g_max = 1.0 + max(s.g_delta, default=0.0)
+    tol = reference_time_tolerance(s) + g_max / (s.v0 * min(s.h_values)) + 1e-9
+    # Replication times of the first and last base inside each range, which are within the time it takes to
+    # replicate a single base of the times at which the replisome replicating that base enters / exits the range.
+    # Range ends may be origins which are replicated passively before they fire, see T().
+    tol_rep = tol + g_max / (s.v0 * min(s.h_values))
+    for i, (l, u) in enumerate(zip(s.g_xranges_l, s.g_xranges_u)):
+        enter_fwd, exit_fwd = forks.enter_fwd[i].item(), forks.exit_fwd[i].item()
+        enter_rev, exit_rev = forks.enter_rev[i].item(), forks.exit_rev[i].item()
+        # Entry and exit times (actual or counterfactual) match the reference for a single replisome
+        for oi, direction, enter, exit in ((fwd[i], +1, enter_fwd, exit_fwd), (rev[i], -1, enter_rev, exit_rev)):
+            if oi < 0:
+                assert np.isnan(enter) and np.isnan(exit)
+                continue
+            enter_ref, exit_ref = reference_fork_times(s, oi, direction, l, u, owner)
+            assert abs(enter - enter_ref) <= tol, f"range {i}, direction {direction}: entry {enter} != {enter_ref}"
+            assert abs(exit - exit_ref) <= tol, f"range {i}, direction {direction}: exit {exit} != {exit_ref}"
+        # Actual times agree with the replication times. A replisome replicates the whole range if it exits
+        # before the other one enters. Otherwise, the replisomes meet inside the range.
+        if exit_fwd <= enter_rev or np.isnan(enter_rev):
+            assert abs(enter_fwd - t_rep[l + 1]) <= tol_rep and abs(exit_fwd - t_rep[u - 1]) <= tol_rep
+            np.testing.assert_allclose(time[i].item(), exit_fwd - enter_fwd, rtol=1e-9)
+        elif exit_rev <= enter_fwd or np.isnan(enter_fwd):
+            assert abs(enter_rev - t_rep[u - 1]) <= tol_rep and abs(exit_rev - t_rep[l + 1]) <= tol_rep
+            np.testing.assert_allclose(time[i].item(), exit_rev - enter_rev, rtol=1e-9)
+        else:
+            assert abs(enter_fwd - t_rep[l + 1]) <= tol_rep and abs(enter_rev - t_rep[u - 1]) <= tol_rep
+            assert time[i].item() < (exit_fwd - enter_fwd) + (exit_rev - enter_rev)
+
+
+def test_g_range_forks_passive_origins():
+    """ Replisomes which never fire count as missing, the other replisome of a passively replicated origin doesn't """
+    # ori2 at 11000 is replicated passively from both sides and fires in neither direction
+    s = next(s for s in PASSAGE_SCENARIOS if s.name == "linear, all combined")
+    with torch.no_grad():
+        forks = make_model(s).g_range_forks()
+    assert s.g_xranges_l[1] == 9000 and s.g_xranges_u[1] == 10500
+    assert forks.origin_fwd[1] == "ori1" and forks.origin_rev[1] is None and forks.oi_rev[1].item() == -1
+    assert np.isnan(forks.enter_rev[1].item()) and np.isnan(forks.exit_rev[1].item())
+    assert not np.isnan(forks.enter_fwd[1].item()) and not np.isnan(forks.exit_fwd[1].item())
+    # ori2 at 11000 is replicated passively from the left, but still fires rightwards into [11000, 12000)
+    s = next(s for s in PASSAGE_SCENARIOS if s.name.startswith("circular, g range starting at passively"))
+    with torch.no_grad():
+        forks = make_model(s).g_range_forks()
+    assert forks.origin_fwd == ["ori2"] and forks.origin_rev == ["ori0"]
+
+
+def test_g_range_forks_cases_covered():
+    """ The scenarios contain ranges replicated by either replisome, ranges at which replisomes meet, and ranges
+    without origin on one side """
+    cases = set()
+    for s in PASSAGE_SCENARIOS:
+        with torch.no_grad():
+            forks = make_model(s).g_range_forks()
+        for i in range(len(s.g_xranges_l)):
+            ef, xf, er, xr = (getattr(forks, n)[i].item() for n in ("enter_fwd", "exit_fwd", "enter_rev", "exit_rev"))
+            if np.isnan(ef) or np.isnan(er):
+                cases.add("missing")
+            elif xf <= er:
+                cases.add("forward")
+            elif xr <= ef:
+                cases.add("reverse")
+            else:
+                cases.add("meet")
+    assert cases == {"missing", "forward", "reverse", "meet"}
+
+
+def test_g_range_forks_concatenate_chromosomes():
+    scenarios = [s for s in SCENARIOS if s.name in ("circular, g", "linear, g")]
+    temporal = TemporalModel(dtensor(scenarios[0].h_tgrid), v0_min=dtensor([1.0]), v0_max=dtensor([1000.0]))
+    chromosomes = [make_chromosome(s, f"chr{i}") for i, s in enumerate(scenarios)]
+    m = VelocityModel(temporal, chromosomes)
+    for s, c in zip(scenarios, chromosomes):
+        set_parameters(s, temporal, c)
+    with torch.no_grad():
+        forks = m.g_range_forks()
+        parts = [c.g_range_forks(temporal) for c in chromosomes]
+    assert forks.origin_fwd == parts[0].origin_fwd + parts[1].origin_fwd
+    assert forks.origin_rev == parts[0].origin_rev + parts[1].origin_rev
+    assert forks.origin_fwd[0].startswith("chr0.") and forks.origin_fwd[-1].startswith("chr1.")
+    for name in ("oi_fwd", "oi_rev", "enter_fwd", "exit_fwd", "enter_rev", "exit_rev"):
+        assert torch.equal(getattr(forks, name).nan_to_num(-1.0),
+                           torch.cat([getattr(p, name) for p in parts]).nan_to_num(-1.0))
+
+
+def test_g_range_forks_without_g_ranges():
+    s = next(s for s in SCENARIOS if s.name == "circular, constant v")
+    with torch.no_grad():
+        forks = make_model(s).g_range_forks()
+    assert forks.origin_fwd == [] and forks.enter_fwd.numel() == 0

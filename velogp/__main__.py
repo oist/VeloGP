@@ -629,13 +629,24 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         for c in MODEL.chromosomes:
             assert all(c.g_xranges_l == pt.tensor([f.begin for f in VX_FEATURES if f.chr == c.name], dtype=pt.int32))
         # Build table
+        # Replisomes coming from the closest origin to the left (forward) and right (reverse) of each feature
+        with pt.no_grad():
+            forks = MODEL.g_range_forks()
+        origin_fwd = [o if o is not None else "NA" for o in forks.origin_fwd]
+        origin_rev = [o if o is not None else "NA" for o in forks.origin_rev]
         chr_slen = max([len("chr")] + [ len(f.chr) for f in VX_FEATURES ])
         fn_slen = max([len("feature")] + [ len(f.name) for f in VX_FEATURES ])
+        on_slen = max([len("NA")] + [ len(o) for o in origin_fwd + origin_rev ])
         cols = [ ('chr', f'U{chr_slen}'), ('begin', np.int32), ('end', np.int32), ('length', np.int32),
                  ('name', f'U{fn_slen}'), ('delayscale', np.float64),
                  ('g', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64),
-                 ('time_s', np.float64), ('delay_s', np.float64) ]
-        fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f', '%.5f', '%.5f')
+                 ('time_s', np.float64), ('delay_s', np.float64),
+                 ('origin_forward', f'U{on_slen}'), ('origin_forward_enter', np.float64),
+                 ('origin_forward_exit', np.float64),
+                 ('origin_reverse', f'U{on_slen}'), ('origin_reverse_enter', np.float64),
+                 ('origin_reverse_exit', np.float64) ]
+        fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f', '%.5f', '%.5f',
+               '%s', '%.5f', '%.5f', '%s', '%.5f', '%.5f')
         tab = np.zeros(len(features), dtype=cols)
         tab["chr"] = [f.chr for f in features ]
         tab["begin"] = [f.begin for f in features ]
@@ -654,6 +665,19 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         tab["delay_s"] = delay_s.numpy()
         # Delays relative to the duration of the replication cycle
         tab["delay_rel"] = tab["delay_s"] / cycle_time.item()
+        # Times at which these replisomes enter and exit the feature if they didn't stop when meeting the other
+        # replisome. For the replisome which replicates the feature these are the actual times, for the other one
+        # they are counterfactual, i.e. the times at which it would reach the feature next. If the replisomes meet
+        # inside the feature, entry times are actual and exit times counterfactual. Counterfactual times assume
+        # g = 1 wherever the other replisome actually replicates, see ChromosomeModel.g_range_forks(). Origin NA and
+        # times NaN if there is no origin on that side, or if its replisome never fires because the origin is
+        # replicated passively before.
+        tab["origin_forward"] = origin_fwd
+        tab["origin_forward_enter"] = forks.enter_fwd.numpy()
+        tab["origin_forward_exit"] = forks.exit_fwd.numpy()
+        tab["origin_reverse"] = origin_rev
+        tab["origin_reverse_enter"] = forks.enter_rev.numpy()
+        tab["origin_reverse_exit"] = forks.exit_rev.numpy()
         # Write tab-separated to output file
         f = open_file(ARGS.out_vx_feature_delays, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")

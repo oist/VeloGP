@@ -812,6 +812,11 @@ class ChromosomeModel(nn.Module):
         right_fires: bool
         # The (physical) time at which the segment is fully replicated
         t_meet: Tensor
+        # The virtual time at which the segment is fully replicated, i.e. H(t_meet), and the (physical) location
+        # at which this happens, i.e. where the two replisomes meet. If only one replisome fires, this is the
+        # opposite end of the segment.
+        u_meet: Tensor
+        x_meet: Tensor
 
     def segments(self, temporal: TemporalModel) -> List[Segment]:
         """
@@ -867,13 +872,24 @@ class ChromosomeModel(nn.Module):
             # Compute time at which the segment is fully replicated
             # TODO: We ignore diffusion here atm
             if left_fires and right_fires:
-                t_meet = temporal.Hinv((u_segment + u_left + u_right) / 2.0)
+                u_meet = (u_segment + u_left + u_right) / 2.0
+                u_meet_left = u_meet - u_left
             elif left_fires:
-                t_meet = temporal.Hinv(u_left + u_segment)
+                u_meet = u_left + u_segment
+                u_meet_left = u_segment
             else:
-                t_meet = temporal.Hinv(u_right + u_segment)
+                u_meet = u_right + u_segment
+                u_meet_left = zeros_like(u_segment)
+            t_meet = temporal.Hinv(u_meet)
+            # Location of the meeting point. The replisome coming from the left travels the virtual distance
+            # u_meet_left * v0 before meeting the other replisome (or reaching the end of the segment).
+            z_meet = self.G_0(o_left) + u_meet_left * temporal.v0
+            if self.is_circular:
+                z_meet = where(z_meet >= self.G_0(self.length), z_meet - self.G_0(self.length), z_meet)
+            x_meet = self.G_0_inv(z_meet)
             result.append(ChromosomeModel.Segment(ri_left, ri_right, has_left, has_right, o_left, o_right,
-                                                  d_left, d_right, left_fires, right_fires, t_meet))
+                                                  d_left, d_right, left_fires, right_fires, t_meet,
+                                                  u_meet.reshape(()), x_meet.reshape(())))
         return result
 
     def completion_time(self, temporal: TemporalModel) -> Tensor:
@@ -1171,12 +1187,7 @@ class ChromosomeModel(nn.Module):
         if numel(self.g_xranges_l) == 0:
             return zeros(0, dtype=torch.float64), zeros(0, dtype=torch.float64)
         p, q = self.g_xranges_l, self.g_xranges_u
-        # Virtual arrival times of the replisome coming from the left at p and of the one coming from the right
-        # at q. For p (respectively q) the origin to the left (right) is the same as for the interior of [p,q]
-        # since there are no origins strictly between p and q, and an origin at p (q) is its own surrounding origin.
-        delay_virtual = temporal.H(self.delay(temporal))
-        u_left_p, _ = self.fork_arrival_times(self.prepare_input(p), temporal, delay_virtual)
-        _, u_right_q = self.fork_arrival_times(self.prepare_input(q), temporal, delay_virtual)
+        u_left_p, u_right_q, _, _ = self.g_range_arrivals(temporal)
         # Virtual time per base pair within the range
         c = self.g / temporal.v0
         # Meeting point m of the two replisomes, clamped to [p,q]. A missing replisome has arrival time +inf,
@@ -1194,6 +1205,131 @@ class ChromosomeModel(nn.Module):
         time = time_left + time_right
         delay = time * self.g_delta / self.g
         return time, delay
+
+    def g_range_arrivals(self, temporal: TemporalModel) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Returns the virtual times at which the replisomes surrounding each g range arrive at the range
+
+        For g range [p,q] these are the virtual arrival times of the replisome moving rightwards from the closest
+        origin to the left of the range at p, and of the replisome moving leftwards from the closest origin to the
+        right of the range at q. Each arrival time ignores the respective other replisome, i.e. a replisome may in
+        fact meet the other replisome before it arrives. For p (respectively q) the origin to the left (right) is
+        the same as for the interior of [p,q] since there are no origins strictly between p and q (see
+        `__init__()`), and an origin at p (q) is its own surrounding origin.
+
+        :param temporal: The time-dependent part of the model
+        :return: Tuple (u_left_p, u_right_q, oi_left, oi_right) where u_left_p, u_right_q are the virtual arrival
+        times and oi_left, oi_right the indices of the origins. On linear chromosomes, there may be no origin to
+        the left or right of a range, the arrival time is then +inf and the origin index -1.
+        """
+        delay_virtual = temporal.H(self.delay(temporal))
+        p_prep, q_prep = self.prepare_input(self.g_xranges_l), self.prepare_input(self.g_xranges_u)
+        u_left_p, _ = self.fork_arrival_times(p_prep, temporal, delay_virtual)
+        _, u_right_q = self.fork_arrival_times(q_prep, temporal, delay_virtual)
+        with no_grad():
+            oi_left = where(p_prep.has_left, p_prep.origin_index_left, -1)
+            oi_right = where(q_prep.has_right, q_prep.origin_index_right, -1)
+        return u_left_p, u_right_q, oi_left, oi_right
+
+    @dataclass
+    class GRangeForks:
+        """
+        The two replisomes surrounding each g range, see `ChromosomeModel.g_range_forks()`
+
+        The forward replisome is the one moving rightwards (direction +1) from the closest origin to the left of the
+        range, the reverse replisome the one moving leftwards (direction -1) from the closest origin to the right.
+        All fields contain one entry per g range.
+        """
+        # Indices and names of the origins of the forward and reverse replisome. On linear chromosomes, there may
+        # be no origin to the left or right of a range. A replisome also counts as missing if it never fires
+        # because its origin is replicated passively before (see `segments()`). The index is then -1 and the name
+        # None.
+        oi_fwd: Tensor
+        oi_rev: Tensor
+        origin_fwd: list[str | None]
+        origin_rev: list[str | None]
+        # (Physical) times at which the replisomes enter and exit the range if they didn't stop when meeting the
+        # respective other replisome. The forward replisome enters at the left end and exits at the right end, the
+        # reverse replisome vice versa. For the replisome which replicates the whole range these are the actual
+        # times. For the other replisome, which then never reaches the range, they are counterfactual, i.e. the
+        # times at which that replisome would reach the range next. If the replisomes meet inside the range, entry
+        # times are actual and exit times counterfactual for both. Since the delay caused by a region may depend on
+        # the direction in which it is replicated, counterfactual times assume g = 1 beyond the point where the
+        # replisome would have met the other replisome, i.e. on all locations actually replicated by the other
+        # replisome. NaN if the replisome is missing.
+        enter_fwd: Tensor
+        exit_fwd: Tensor
+        enter_rev: Tensor
+        exit_rev: Tensor
+
+        @staticmethod
+        def cat(parts: list[ChromosomeModel.GRangeForks]) -> ChromosomeModel.GRangeForks:
+            """ Concatenates the g ranges of multiple chromosomes """
+            return ChromosomeModel.GRangeForks(*(
+                builtins.sum((getattr(p, f.name) for p in parts), []) if isinstance(getattr(parts[0], f.name), list)
+                else cat([getattr(p, f.name) for p in parts])
+                for f in dataclasses.fields(ChromosomeModel.GRangeForks)))
+
+    def g_range_forks(self, temporal: TemporalModel) -> GRangeForks:
+        """Returns the replisomes surrounding each g range, and when they (would) enter and exit the range
+
+        Entry and exit times ignore that replisomes stop when they meet, see `GRangeForks`. A range [p,q] lies
+        within the segment between its forward and reverse origin (see `segments()`), in which the replisomes of
+        these origins meet at virtual time u_meet at location x_meet (see `Segment`). Up to x_meet, a replisome's
+        (virtual) arrival times are the actual ones, see `g_range_arrivals()`. Since g(x) = g_i is constant on the range, a
+        replisome arriving at one end of the range at virtual time u arrives at the other end at virtual time
+        u + g_i * (q - p) / v0. Beyond x_meet, the replisome continues counterfactually with g = 1, i.e. arrives at
+        location x at virtual time u_meet + |x - x_meet| / v0. A replisome reaches x_meet at virtual time u_meet,
+        locations x it reaches before (after) that are thus those with actual arrival times <= u_meet (> u_meet).
+        A replisome which never fires (because its origin is replicated passively first) is treated as missing.
+
+        :param temporal: The time-dependent part of the model
+        :return: A `GRangeForks` instance
+        """
+        u_left_p, u_right_q, oi_fwd, oi_rev = self.g_range_arrivals(temporal)
+        p_d, q_d = self.g_xranges_l.double(), self.g_xranges_u.double()
+        L = self.length.double()
+        # Meeting time and location within the segment containing each range. The segment between origins
+        # i and i+1 is segment i+1 (with wrap-around on circular chromosomes), see `segments()`.
+        segments = self.segments(temporal)
+        seg_index = oi_fwd + 1
+        if self.is_circular:
+            seg_index = remainder(seg_index, numel(self.origins))
+        u_meet = stack([sg.u_meet for sg in segments])[seg_index]
+        x_meet = stack([sg.x_meet for sg in segments])[seg_index]
+        # Replisomes which never fire count as missing
+        left_fires = tensor([sg.left_fires for sg in segments], dtype=torch.bool)[seg_index]
+        right_fires = tensor([sg.right_fires for sg in segments], dtype=torch.bool)[seg_index]
+        oi_fwd = where(left_fires, oi_fwd, -1)
+        oi_rev = where(right_fires, oi_rev, -1)
+        has_fwd, has_rev = oi_fwd >= 0, oi_rev >= 0
+
+        def wrap(d: Tensor) -> Tensor:
+            """ Maps a (directed) distance between two locations of a circular chromosome to [0, L) """
+            if self.is_circular:
+                d = where(d < -L / 2, d + L, d)
+            return clamp(d, min=0.0)
+
+        # Replace arrival times of missing replisomes (+inf) by a finite placeholder to avoid inf - inf
+        u_safe = temporal.h_tgrid[0]
+        u_l_p = where(has_fwd, u_left_p, u_safe)
+        u_r_q = where(has_rev, u_right_q, u_safe)
+        # Actual virtual arrival times at both ends of the range
+        u_range = self.g * (q_d - p_d) / temporal.v0
+        u_l_q, u_r_p = u_l_p + u_range, u_r_q + u_range
+        # Counterfactual virtual arrival times beyond the meeting point
+        u_l_p = where(u_l_p <= u_meet, u_l_p, u_meet + wrap(p_d - x_meet) / temporal.v0)
+        u_l_q = where(u_l_q <= u_meet, u_l_q, u_meet + wrap(q_d - x_meet) / temporal.v0)
+        u_r_q = where(u_r_q <= u_meet, u_r_q, u_meet + wrap(x_meet - q_d) / temporal.v0)
+        u_r_p = where(u_r_p <= u_meet, u_r_p, u_meet + wrap(x_meet - p_d) / temporal.v0)
+        nan_ = dtensor(nan)
+        return ChromosomeModel.GRangeForks(
+            oi_fwd=oi_fwd, oi_rev=oi_rev,
+            origin_fwd=[self.origin_names[i] if i >= 0 else None for i in oi_fwd.tolist()],
+            origin_rev=[self.origin_names[i] if i >= 0 else None for i in oi_rev.tolist()],
+            enter_fwd=where(has_fwd, temporal.Hinv(u_l_p), nan_),
+            exit_fwd=where(has_fwd, temporal.Hinv(u_l_q), nan_),
+            enter_rev=where(has_rev, temporal.Hinv(u_r_q), nan_),
+            exit_rev=where(has_rev, temporal.Hinv(u_r_p), nan_))
 
     def prior_gdelta(self, hyperparameter_dependence: bool):
         """The prior log-probability of self.g_delta as a realization of independent Gaussians
@@ -1589,6 +1725,15 @@ class VelocityModel(nn.Module):
         """
         r = [c.g_range_passage_times(self.temporal) for c in self.chromosomes]
         return tuple(cat(parts) for parts in zip(*r))
+
+    def g_range_forks(self) -> ChromosomeModel.GRangeForks:
+        """
+        Returns the replisomes surrounding each g range, see `ChromosomeModel.g_range_forks()`
+
+        The g ranges of chromosome `self.chromosomes[i]` follow those of chromosome `self.chromosomes[i-1]`. Origin
+        indices refer to the origins of the chromosome containing the respective g range.
+        """
+        return ChromosomeModel.GRangeForks.cat([c.g_range_forks(self.temporal) for c in self.chromosomes])
 
     def completion_time(self) -> Tensor:
         """
