@@ -534,6 +534,13 @@ print("*** COMPUTING POSTERIOR DISTRIBUTIONS")
 COV_V0, COV_V0_PMAP = MODEL.posterior_cov(LOSS, ["temporal.v0_log"])
 COV_HG, COV_HG_PMAP = MODEL.posterior_cov(LOSS, ["temporal.h_log_raw"] + [f"chromosomes.{i}.g_delta_scaled" for i in range(len(MODEL.chromosomes))])
 
+# The baseline velocity reported in place of the raw parameter v0 is the log-mean of v(t) over the replication cycle
+# [0, C], see TemporalModel.v0_proper(). The raw v0 is fixed only by the GP prior on log h(t), not by the data.
+with pt.no_grad():
+    REPLICATION_TIME = MODEL.completion_time()
+    V0 = MODEL.temporal.v0_proper(REPLICATION_TIME)
+print(f"Replication time C: {REPLICATION_TIME.item():.0f} [s], baseline velocity v0 (log-mean of v(t) over [0, C]): {V0.item():.1f} [bp/s]")
+
 # Save results
 print("*** SAVING RESULTS")
 
@@ -716,7 +723,7 @@ if (ARGS.out_trajectories is not None) and (ARGS.out_trajectories != ""):
         # Fill columns, v(t)=v0*h(t) first
         tab = np.zeros(MODEL.temporal.h_tgrid.shape[0], dtype=cols)
         tab["t"] = MODEL.temporal.h_tgrid.detach().numpy()
-        tab["v0"] = MODEL.temporal.v0.detach().numpy()
+        tab["v0"] = V0.numpy()
         tab["vt"] = MODEL.temporal.v_t(MODEL.temporal.h_tgrid).detach().numpy()
         tab["vt_stderr"] = MODEL.v_t_posterior_stderr(MODEL.temporal.h_tgrid, posterior_cov=COV_HG, pmap=COV_HG_PMAP).detach()
         # Duration of the replication cycle, i.e. the time after which no replisome is active anymore
@@ -764,7 +771,7 @@ if (ARGS.plot_vt is not None) and (ARGS.plot_vt != ""):
         pp.clf()
         pp.figure(figsize=(2.5, 2.0))
         pp.ylim(plot_yrange)
-        pp.axhline(y=MODEL.temporal.v0.detach().numpy(), linestyle="dotted", color="black", linewidth=0.5)
+        pp.axhline(y=V0.numpy(), linestyle="dotted", color="black", linewidth=0.5)
         pp.step(plot_t.numpy() / DOUBLINGTIME, plot_vt.numpy(), linewidth=0.5, color="navy")
         pp.fill_between(plot_t.numpy() / DOUBLINGTIME,
                         plot_vt.numpy() - 2 * plot_vt_stderr.numpy(), plot_vt.numpy() + 2 * plot_vt_stderr.numpy(),

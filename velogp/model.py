@@ -151,6 +151,25 @@ class TemporalModel(nn.Module):
         assert((value.dim() == 0))
         self.v0_log.copy_(log(value))
 
+    def v0_proper(self, tmax: Tensor) -> Tensor:
+        """The log-mean of v(t) over [0, tmax], i.e. exp( (1/tmax) int_0^tmax log v(t) dt )
+
+        The split of v(t) = v0 * h(t) into v0 and h(t) is not identified by the data, only by the zero-mean GP prior
+        on log h(t). The raw parameter v0 is therefore a GLS-weighted (not a uniform) mean of v(t), and is not suitable
+        for reporting. This method instead returns the geometric mean of v(t) over the interval [0, tmax], typically
+        the replication cycle [0, C] with C = `VelocityModel.completion_time()`. The parameters v0, h(t) are unchanged.
+
+        :param tmax: End of the averaging interval (0-dim tensor), must be positive
+        :return: v0_proper as a 0-dim tensor
+        """
+        assert (tmax.numel() == 1) and (tmax.item() > 0.0)
+        tmax = tmax.reshape(())
+        # Since h(t) is piece-wise constant on h_tgrid, the integral of log h(t) is the sum over grid cells
+        # [h_tgrid[i], h_tgrid[i+1]) of log h[i] times the length of the cell's intersection with [0, tmax]
+        with no_grad():
+            c = clamp(minimum(tmax - self.h_tgrid, self.h_tgrid_len), min=0.0)
+        return self.v0 * exp(sum(c * self.h_log("canonical")) / tmax)
+
     def h_indices(self, t: Tensor) -> Tensor:
         """
         Map times `t` to their corresponding indices in `h_tgrid`

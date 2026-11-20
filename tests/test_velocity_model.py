@@ -26,6 +26,7 @@ Run with `python -m pytest` from the repository root.
 from __future__ import annotations
 
 import bisect
+import math
 import dataclasses
 from dataclasses import dataclass, field
 
@@ -894,3 +895,28 @@ def test_g_range_block_probability_concatenate_chromosomes():
         p = m.g_range_block_probability()
         parts = [c.g_range_block_probability(temporal) for c in chromosomes]
     assert torch.equal(p.nan_to_num(-1.0), torch.cat(parts).nan_to_num(-1.0))
+
+
+@pytest.mark.parametrize("tmax", [5.0, 10.0, 25.0, 37.5, 100.0])
+def test_v0_proper_is_log_mean_of_v(tmax: float):
+    """ v0_proper(tmax) is the geometric mean of v(t) = v0 * h(t) over [0, tmax], checked by numerical integration """
+    temporal = TemporalModel(dtensor([0.0, 10.0, 20.0, 40.0]), v0_min=dtensor([1.0]), v0_max=dtensor([1000.0]))
+    with torch.no_grad():
+        temporal.v0 = dtensor(50.0)
+        temporal.h_log_raw = torch.log(dtensor([0.5, 2.0, 1.5, 0.8]))
+    # N is chosen such that the jumps of h(t) at 10, 20, 40 fall on sample boundaries for every tmax
+    t = (torch.arange(240000, dtype=torch.float64) + 0.5) * (tmax / 240000)
+    expected = torch.exp(torch.mean(torch.log(temporal.v_t(t))))
+    assert temporal.v0_proper(dtensor(tmax)).item() == pytest.approx(expected.item(), rel=1e-9)
+
+
+def test_v0_proper_invariant_under_v0_h_rescaling():
+    """ Moving a constant factor between v0 and h(t) leaves v(t), and hence v0_proper, unchanged """
+    temporal = TemporalModel(dtensor([0.0, 10.0, 20.0, 40.0]), v0_min=dtensor([1.0]), v0_max=dtensor([1000.0]))
+    h_log = torch.log(dtensor([0.5, 2.0, 1.5, 0.8]))
+    with torch.no_grad():
+        temporal.v0, temporal.h_log_raw = dtensor(50.0), h_log.clone()
+        a = temporal.v0_proper(dtensor(30.0)).item()
+        temporal.v0, temporal.h_log_raw = dtensor(200.0), h_log - math.log(4.0)
+        b = temporal.v0_proper(dtensor(30.0)).item()
+    assert a == pytest.approx(b, rel=1e-12)
