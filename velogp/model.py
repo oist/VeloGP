@@ -596,6 +596,8 @@ class ChromosomeModel(nn.Module):
 
     int32_min : int = -2**31
     int32_max : int = 2**31 - 1
+    # Upper bound of g_delta_scaled, i.e. g_delta is at most this multiple of its prior mean g_delta_prefactor
+    g_delta_scaled_max : float = 20.0
 
     @dataclass
     class X:
@@ -729,7 +731,7 @@ class ChromosomeModel(nn.Module):
             assert all(isfinite(self.delay_scaled))
             self.delay_scaled.clamp_(0.0, math.inf)
             assert all(isfinite(self.g_delta_scaled))
-            self.g_delta_scaled.clamp_(0.0, 10)
+            self.g_delta_scaled.clamp_(0.0, self.g_delta_scaled_max)
 
     def owns(self, parameter: Tensor) -> bool:
         """ Whether `parameter` is one of the parameters of this chromosome """
