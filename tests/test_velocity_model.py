@@ -829,7 +829,14 @@ def test_g_range_block_probability_matches_mixture(s: Scenario):
         passing = [d for d in (+1, -1) if ref[d][1] < ref[-d][0] - tol]
         if not passing:
             if all(ref[d][1] > ref[-d][0] + tol for d in (+1, -1)):
-                assert np.isnan(p_block[i]), f"range {i}: replisomes meet inside, but p = {p_block[i]}"
+                # Replisomes meet inside. p = 1 if the replisome entering first would pass without delay, else NaN
+                d = +1 if ref[+1][0] <= ref[-1][0] else -1
+                s_nodelay = dataclasses.replace(s, g_delta=[0.0 if j == i else gd for j, gd in enumerate(s.g_delta)])
+                t_1 = reference_fork_times(s_nodelay, oi[d], d, l, u, owner)[1]
+                if t_1 < ref[-d][0] - tol:
+                    assert p_block[i] == 1.0, f"range {i}: replisomes meet because of the delay, but p = {p_block[i]}"
+                elif t_1 > ref[-d][0] + tol:
+                    assert np.isnan(p_block[i]), f"range {i}: replisomes meet without delay, but p = {p_block[i]}"
             continue
         d = passing[0]
         assert not np.isnan(p_block[i])
@@ -851,10 +858,19 @@ def test_g_range_block_probability_cases():
                  g_xranges_l=[500, 4000, 12000], g_xranges_u=[1500, 6000, 12500], g_delta=[0.0, 0.0, 0.0])
     with torch.no_grad():
         assert torch.all(make_model(s).g_range_block_probability() == 0.0)
-    # Replisomes meeting inside ranges
+    # Replisomes meeting inside ranges even without delay
     s = next(s for s in PASSAGE_SCENARIOS if s.name.startswith("circular, replisomes meet inside"))
+    s = dataclasses.replace(s, g_delta=[0.0] * len(s.g_delta))
     with torch.no_grad():
         assert torch.all(torch.isnan(make_model(s).g_range_block_probability()))
+    # Replisomes meeting inside a short range only because of a large delay. Without delay, the forward replisome
+    # from 2000 passes [6000, 6100) long before the reverse one from 15000 arrives.
+    s = Scenario("delay causes meeting", 20000, True, [2000, 15000], h_tgrid=H_TGRID, h_values=H_VARYING,
+                 g_xranges_l=[6000], g_xranges_u=[6100], g_delta=[400.0])
+    with torch.no_grad():
+        forks = make_model(s).g_range_forks()
+        assert forks.enter_fwd[0] < forks.enter_rev[0] < forks.exit_fwd[0]
+        assert make_model(s).g_range_block_probability()[0].item() == 1.0
     # Without opposite replisome, p = 1 - exp(-lambda delay). With constant v, delay = g_delta * length / v0
     s = next(s for s in PASSAGE_SCENARIOS if s.name.startswith("linear, g ranges at chromosome ends"))
     s = dataclasses.replace(s, h_tgrid=[0.0], h_values=[1.0])

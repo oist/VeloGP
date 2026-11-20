@@ -672,8 +672,9 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         tab["delay_s"] = delay_s.numpy()
         # Delays relative to the duration of the replication cycle
         tab["delay_rel"] = tab["delay_s"] / cycle_time.item()
-        # Probability of permanently blocking the replisome passing the feature that is equivalent to the delay
-        # (NaN if both replisomes enter the feature), see ChromosomeModel.g_range_block_probability()
+        # Probability of permanently blocking the replisome entering the feature first that is equivalent to the
+        # delay. 1 if the replisomes meet inside the feature because of the delay (a lower bound), NaN if they would
+        # meet inside even without delay, see ChromosomeModel.g_range_block_probability()
         with pt.no_grad():
             tab["p_block"] = MODEL.g_range_block_probability().numpy()
         # Times at which these replisomes enter and exit the feature if they didn't stop when meeting the other

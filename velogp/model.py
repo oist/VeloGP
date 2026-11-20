@@ -1363,10 +1363,14 @@ class ChromosomeModel(nn.Module):
         and lambda the growth rate. p is chosen such that A equals the abundance exp(-lambda t_x) predicted by the
         deterministic model, where t_x is the (delayed) exit time, i.e.
             p = (1 - exp(-lambda (t_x - t_1))) / (1 - exp(-lambda (t_2 - t_1))).
-        Since t_1 <= t_x <= t_2, p lies in [0, 1]. If there is no opposite replisome, t_2 = +inf.
+        If there is no opposite replisome, t_2 = +inf.
 
-        p is NaN if the two replisomes meet inside the range, since then no replisome passes it, and 0 if the
-        range causes no delay (g = 1).
+        p refers to the replisome which enters the range first. If it passes the range, t_1 <= t_x <= t_2 and p lies
+        in [0, 1]. If the replisomes meet inside the range only because of the delay, i.e. t_1 < t_2 < t_x, no
+        replisome passes the range, which corresponds to complete blocking, and p = 1. Note that this is only a lower
+        bound, since the data cannot distinguish complete blocking from blocking with a probability close to 1. If the
+        replisomes would meet inside the range even without delay (t_2 <= t_1), the range does not block anything
+        and p is NaN. p = 0 if the range causes no delay (g = 1).
 
         :param temporal: The time-dependent part of the model
         :return: Tensor containing one probability per g range
@@ -1377,21 +1381,23 @@ class ChromosomeModel(nn.Module):
         inf_ = dtensor(float('inf'))
         enter_fwd, exit_fwd = where(has_fwd, forks.enter_fwd, inf_), where(has_fwd, forks.exit_fwd, inf_)
         enter_rev, exit_rev = where(has_rev, forks.enter_rev, inf_), where(has_rev, forks.exit_rev, inf_)
-        # A replisome passes the range if it exits before the other replisome enters, otherwise they meet inside
-        passes_fwd = has_fwd & (exit_fwd <= enter_rev)
-        passes_rev = has_rev & ~passes_fwd & (exit_rev <= enter_fwd)
-        # Entry and (delayed) exit time of the passing replisome, entry time of the opposite one
-        t_enter = where(passes_fwd, enter_fwd, where(passes_rev, enter_rev, 0.0))
-        t_x = where(passes_fwd, exit_fwd, where(passes_rev, exit_rev, 0.0))
-        t_2 = where(passes_fwd, enter_rev, where(passes_rev, enter_fwd, inf_))
+        # The replisome which enters the range first. If any replisome passes the range, it is this one.
+        first_fwd = has_fwd & (enter_fwd <= enter_rev)
+        # Entry and (delayed) exit time of that replisome, entry time of the opposite one
+        has_any = has_fwd | has_rev
+        t_enter = where(has_any, where(first_fwd, enter_fwd, enter_rev), 0.0)
+        t_x = where(first_fwd, exit_fwd, exit_rev)
+        t_2 = where(first_fwd, enter_rev, enter_fwd)
         # Exit time without delay, i.e. with g = 1 on the range
         t_1 = temporal.Hinv(temporal.H(t_enter) + self.g_xranges_len.double() / temporal.v0)
         # p = expm1(-lambda (t_x - t_1)) / expm1(-lambda (t_2 - t_1)), expm1 avoids cancellation for small delays.
-        # expm1(-inf) = -1 covers the case of a missing opposite replisome.
+        # expm1(-inf) = -1 covers the case of a missing opposite replisome. If the replisomes meet inside the range
+        # because of the delay, t_x > t_2 and thus p > 1, which is clamped to 1 (complete blocking).
         delay = clamp(t_x - t_1, min=0.0)
-        p = expm1(-lam * delay) / expm1(-lam * (t_2 - t_1))
+        p = clamp(expm1(-lam * delay) / expm1(-lam * (t_2 - t_1)), max=1.0)
         p = where(delay > 0.0, p, 0.0)
-        return where(passes_fwd | passes_rev, p, dtensor(nan))
+        # If the replisomes would meet inside the range even without delay, the range blocks nothing
+        return where(has_any & (t_1 < t_2), p, dtensor(nan))
 
     def prior_gdelta(self, hyperparameter_dependence: bool):
         """The prior log-probability of self.g_delta as a realization of independent Gaussians
