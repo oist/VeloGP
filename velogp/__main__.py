@@ -68,6 +68,11 @@ class Feature:
     end: int
     delayscale: float
     name: str
+    # +1 or -1 for features on the forward or reverse strand, 0 for unstranded features
+    strand: int = 0
+
+# Symbols representing strands and directions in input and output files
+STRAND_SYMBOLS = { 1: "+", -1: "-", 0: "*" }
 
 @dataclass
 class Origin:
@@ -272,7 +277,8 @@ for gff_filename in ARGS.gff:
                     # translates this into zero-based, non-inclusive ranges, so we use them as-is.
                     feature = Feature(chr=seq, begin=int(f.location.start), end=int(f.location.end),
                                       name=f_matching_feature_names[0] if len(f_matching_feature_names) > 0 else f_names[0],
-                                      delayscale=ARGS.vx_delayscale)
+                                      delayscale=ARGS.vx_delayscale,
+                                      strand=f.location.strand if f.location.strand in (1, -1) else 0)
                     # Make sure min < max
                     if feature.begin > feature.end:
                         feature.begin, feature.end = feature.end, feature.begin
@@ -317,6 +323,8 @@ for bed_filename in ARGS.bed:
         if len(fields) < 4:
             raise ArgumentError(f"BED file must have at least 4 columns, found only {len(fields)} columns in line: {line}")
         chr, start, end, name = fields[0], int(fields[1]), int(fields[2]), fields[3]
+        # Strand is the optional 6th column, "." or absent for unstranded features
+        strand = { "+": 1, "-": -1 }.get(fields[5], 0) if len(fields) >= 6 else 0
         # Resolve feature names
         if name in ARGS.vx_feature_names:
             # Named should be unambiguous
@@ -324,7 +332,8 @@ for bed_filename in ARGS.bed:
                 raise ArgumentError(f"feature name {name} is ambiguous")
             # Create feature
             # NOTE: Position in BED files are zero-based, end is not included in the range
-            feature = Feature(chr=chr, begin=start, end=end, name=name, delayscale=ARGS.vx_delayscale)
+            feature = Feature(chr=chr, begin=start, end=end, name=name, delayscale=ARGS.vx_delayscale,
+                              strand=strand)
             # Make sure min < max
             if feature.begin > feature.end:
                 feature.begin, feature.end = feature.end, feature.begin
@@ -361,6 +370,9 @@ for f in VX_FEATURES_TENTATIVE:
         print(f"Merging vx feature {f.name} into previous feture {f_prev.name} due to overlap")
         f_prev.end = max(f_prev.end, f.end)
         f_prev.name = f"{f_prev.name},{f.name}"
+        # The merged feature is stranded only if all its parts lie on the same strand
+        if f_prev.strand != f.strand:
+            f_prev.strand = 0
     else:
         # Otherwise, add new feature
         f_prev = copy.copy(f)
@@ -379,7 +391,7 @@ for f in VX_FEATURES_UNSPLIT:
     bounds = [f.begin] + cuts + [f.end]
     for k, (b, e) in enumerate(zip(bounds[:-1], bounds[1:])):
         VX_FEATURES.append(Feature(chr=f.chr, begin=b, end=e, name=f"{f.name}.{k + 1}",
-                                   delayscale=f.delayscale))
+                                   delayscale=f.delayscale, strand=f.strand))
 
 # Check that every chromosome has an origin
 for chr in CHROMOSOME_LENGTHS.keys():
@@ -644,20 +656,22 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         chr_slen = max([len("chr")] + [ len(f.chr) for f in VX_FEATURES ])
         fn_slen = max([len("feature")] + [ len(f.name) for f in VX_FEATURES ])
         on_slen = max([len("NA")] + [ len(o) for o in origin_fwd + origin_rev ])
-        cols = [ ('chr', f'U{chr_slen}'), ('begin', np.int32), ('end', np.int32), ('length', np.int32),
+        cols = [ ('chr', f'U{chr_slen}'), ('begin', np.int32), ('end', np.int32), ('strand', 'U1'),
+                 ('length', np.int32),
                  ('name', f'U{fn_slen}'), ('delayscale', np.float64),
                  ('g', np.float64), ('delay_bp', np.float64), ('delay_rel', np.float64), ('p_block', np.float64),
-                 ('time_s', np.float64), ('delay_s', np.float64),
+                 ('time_s', np.float64), ('delay_s', np.float64), ('direction', 'U1'),
                  ('origin_forward', f'U{on_slen}'), ('origin_forward_enter', np.float64),
                  ('origin_forward_exit', np.float64),
                  ('origin_reverse', f'U{on_slen}'), ('origin_reverse_enter', np.float64),
                  ('origin_reverse_exit', np.float64) ]
-        fmt = ('%s', '%d', '%d', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f', '%.6g', '%.5f', '%.5f',
+        fmt = ('%s', '%d', '%d', '%s', '%d', '%s', '%.2f', '%.5f', '%.5f', '%.5f', '%.6g', '%.5f', '%.5f', '%s',
                '%s', '%.5f', '%.5f', '%s', '%.5f', '%.5f')
         tab = np.zeros(len(features), dtype=cols)
         tab["chr"] = [f.chr for f in features ]
         tab["begin"] = [f.begin for f in features ]
         tab["end"] = [f.end for f in features ]
+        tab["strand"] = [STRAND_SYMBOLS[f.strand] for f in features ]
         tab["length"] = [f.end - f.begin for f in features ]
         tab["name"] = [f.name for f in features ]
         tab["delayscale"] = [f.delayscale for f in features ]
@@ -690,6 +704,15 @@ if (ARGS.out_vx_feature_delays is not None) and (ARGS.out_vx_feature_delays != "
         tab["origin_reverse"] = origin_rev
         tab["origin_reverse_enter"] = forks.enter_rev.numpy()
         tab["origin_reverse_exit"] = forks.exit_rev.numpy()
+        # Direction in which each feature is traversed, i.e. the direction of the replisome entering it first
+        # (+1 for increasing, -1 for decreasing coordinates, 0 if both enter simultaneously), relative to the
+        # feature's natural direction (its strand). The product is +1 if they agree, -1 if not, and 0 for unstranded
+        # features or simultaneous entry. A missing replisome (NaN entry time) never enters first.
+        enter_fwd, enter_rev = forks.enter_fwd.numpy(), forks.enter_rev.numpy()
+        fwd_first = (enter_fwd < enter_rev) | (np.isnan(enter_rev) & ~np.isnan(enter_fwd))
+        rev_first = (enter_rev < enter_fwd) | (np.isnan(enter_fwd) & ~np.isnan(enter_rev))
+        traversal = fwd_first.astype(int) - rev_first.astype(int)
+        tab["direction"] = [ STRAND_SYMBOLS[f.strand * t] for f, t in zip(features, traversal) ]
         # Write tab-separated to output file
         f = open_file(ARGS.out_vx_feature_delays, "wt+")
         f.write("\t".join([name for (name, type) in cols]) + "\n")
