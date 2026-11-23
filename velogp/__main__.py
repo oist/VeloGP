@@ -318,38 +318,44 @@ for o_type, o_list in ORIGINS_BY_TYPE.items():
 # Read BED files
 for bed_filename in ARGS.bed:
     bed_file = open_file(bed_filename, "rt")
-    for line in bed_file:
-        fields = [ f.strip() for f in line.split("\t") ]
-        if len(fields) < 4:
-            raise ArgumentError(f"BED file must have at least 4 columns, found only {len(fields)} columns in line: {line}")
-        chr, start, end, name = fields[0], int(fields[1]), int(fields[2]), fields[3]
-        # Strand is the optional 6th column, "." or absent for unstranded features
-        strand = { "+": 1, "-": -1 }.get(fields[5], 0) if len(fields) >= 6 else 0
-        # Resolve feature names
-        if name in ARGS.vx_feature_names:
-            # Named should be unambiguous
-            if name not in VX_FEATURE_NAMES_TO_BE_RESOLVED:
-                raise ArgumentError(f"feature name {name} is ambiguous")
-            # Create feature
-            # NOTE: Position in BED files are zero-based, end is not included in the range
-            feature = Feature(chr=chr, begin=start, end=end, name=name, delayscale=ARGS.vx_delayscale,
-                              strand=strand)
-            # Make sure min < max
-            if feature.begin > feature.end:
-                feature.begin, feature.end = feature.end, feature.begin
-            elif feature.begin == feature.end:
-                feature.end += 1
-            # Add to feature list
-            VX_FEATURES_TENTATIVE.append(feature)
-            # Removed from to-be-resolved list
-            VX_FEATURE_NAMES_TO_BE_RESOLVED.remove(feature.name)
-        # Resolve unresolved origin names:
-        if name in ORIGINS_NAMES:
-            if name not in ORIGINS_NAMES_TO_BE_RESOLVED:
-                raise ArgumentError(f"origin name {name} is ambiguous")
-            origin = Origin(chr=chr, pos=int((start + end) / 2), name=name)
-            ORIGINS.append(origin)
-            ORIGINS_NAMES_TO_BE_RESOLVED.remove(name)
+    try:
+        for line in bed_file:
+            # Skip blank lines, comments and the track and browser lines of UCSC-style BED files
+            if (line.strip() == "") or line.startswith(("#", "track", "browser")):
+                continue
+            fields = [ f.strip() for f in line.split("\t") ]
+            if len(fields) < 4:
+                raise ArgumentError(f"BED file must have at least 4 columns, found only {len(fields)} columns in line: {line}")
+            chr, start, end, name = fields[0], int(fields[1]), int(fields[2]), fields[3]
+            # Strand is the optional 6th column, "." or absent for unstranded features
+            strand = { "+": 1, "-": -1 }.get(fields[5], 0) if len(fields) >= 6 else 0
+            # Resolve feature names
+            if name in ARGS.vx_feature_names:
+                # Named should be unambiguous
+                if name not in VX_FEATURE_NAMES_TO_BE_RESOLVED:
+                    raise ArgumentError(f"feature name {name} is ambiguous")
+                # Create feature
+                # NOTE: Position in BED files are zero-based, end is not included in the range
+                feature = Feature(chr=chr, begin=start, end=end, name=name, delayscale=ARGS.vx_delayscale,
+                                  strand=strand)
+                # Make sure min < max
+                if feature.begin > feature.end:
+                    feature.begin, feature.end = feature.end, feature.begin
+                elif feature.begin == feature.end:
+                    feature.end += 1
+                # Add to feature list
+                VX_FEATURES_TENTATIVE.append(feature)
+                # Removed from to-be-resolved list
+                VX_FEATURE_NAMES_TO_BE_RESOLVED.remove(feature.name)
+            # Resolve unresolved origin names:
+            if name in ORIGINS_NAMES:
+                if name not in ORIGINS_NAMES_TO_BE_RESOLVED:
+                    raise ArgumentError(f"origin name {name} is ambiguous")
+                origin = Origin(chr=chr, pos=int((start + end) / 2), name=name)
+                ORIGINS.append(origin)
+                ORIGINS_NAMES_TO_BE_RESOLVED.remove(name)
+    finally:
+        bed_file.close()
 
 # Complain if not all names were resolved
 if len(VX_FEATURE_NAMES_TO_BE_RESOLVED) > 0:
