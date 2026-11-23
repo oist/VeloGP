@@ -20,7 +20,7 @@ import torch
 from torch import nn
 
 from velogp import ChromosomeModel, TemporalModel, VelocityModel, VelocityModelLoss, dtensor
-from velogp.velomix import MixtureModel
+from velogp.velomix import MixtureModel, FitMixtureModel, make_loss
 
 from test_velocity_model import (Scenario, H_TGRID, H_VARYING, make_model, make_chromosome, set_parameters,
                                  model_positions, reference_replication_times, reference_time_tolerance)
@@ -352,6 +352,84 @@ def test_windows_inside_blocked():
     x = torch.tensor([3999, 4000, 4001, 5999, 6000, 7200, 12100], dtype=torch.int32)
     # Only site2 (4000-6000) has polarity "both"
     assert m.windows_inside_blocked(x, torch.zeros_like(x, dtype=torch.long)) == 2
+
+
+# A small scenario in which both events clearly affect the abundance, for fitting
+FIT_SCENARIO = (
+    Scenario("fit", 20000, True, [2000, 11000], h_tgrid=H_TGRID, h_values=[1.0] * len(H_TGRID),
+             g_xranges_l=[5000, 14000], g_xranges_u=[5500, 15000], g_delta=[0.5, 1.0], delay=[0.0, 50.0]),
+    [0, 1],
+    [("site1", "both")])
+
+
+def make_fit_problem(p_fire: float, p_stall: float):
+    s, strands, sites = FIT_SCENARIO
+    original = make_model(s)
+    original.chromosomes[0].g_strands = torch.tensor(strands, dtype=torch.int32)
+    truth = MixtureModel(original, sites)
+    with torch.no_grad():
+        truth.events.p_fire.fill_(p_fire)
+        truth.events.p_stall.fill_(p_stall)
+        x = model_positions(s)[::100].clone()
+        y = 1.7 * truth.forward(x)
+    original_loss = VelocityModelLoss(x, y.clone(), 0.002 * y, original, [])
+    m = MixtureModel(original, sites)
+    return m, FitMixtureModel(m, make_loss(m, original_loss))
+
+
+def test_fit_parameters():
+    m, alg = make_fit_problem(0.4, 0.6)
+    assert FitMixtureModel.parameter_names(m) == ["temporal.v0_log", "temporal.h_log_raw",
+                                                  "chromosomes.0.g_delta_scaled", "events.p_fire", "events.p_stall"]
+    # Turning the fitted tensors into parameters keeps their values, i.e. h(t) and g are not reset. (The loss
+    # changes, since it only includes the priors of registered parameters.)
+    with torch.no_grad():
+        before = alg.loss.y_pred().clone()
+        g_before = m.chromosomes[0].g_delta_scaled.clone()
+    params = alg.make_parameters()
+    assert all(isinstance(p, nn.Parameter) for p in params) and len(params) == 5
+    with torch.no_grad():
+        torch.testing.assert_close(alg.loss.y_pred(), before, rtol=1e-12, atol=0)
+        torch.testing.assert_close(m.chromosomes[0].g_delta_scaled, g_before)
+    # Gradients reach all parameters through the firing pattern models
+    alg.evaluate_model_for_parameters(params)
+    assert all((p.grad is not None) and torch.all(torch.isfinite(p.grad)) for p in params)
+    assert m.events.p_fire.grad.abs().item() > 0.0 and m.events.p_stall.grad.abs().item() > 0.0
+    with pytest.raises(NotImplementedError):
+        alg.optimize_parameters()
+
+
+def test_fit_recovers_probabilities():
+    torch.manual_seed(0)
+    m, alg = make_fit_problem(0.4, 0.6)
+    alg.optimize_parameters_stochastic(perturb_rejects=2, perturb_end=0.1)
+    assert m.events.p_fire.item() == pytest.approx(0.4, abs=0.02)
+    assert m.events.p_stall.item() == pytest.approx(0.6, abs=0.02)
+    # g of the remaining range is recovered, the stall site keeps g = 1
+    torch.testing.assert_close(m.chromosomes[0].g, dtensor([1.0, 2.0]), rtol=0, atol=0.05)
+
+
+def test_pickle_fitted_mixture():
+    """ A mixture with parameters, its loss and fit algorithm survive pickling, as written to --out-objects """
+    m, alg = make_fit_problem(0.4, 0.6)
+    params = alg.make_parameters()
+    with torch.no_grad():
+        m.events.p_fire.fill_(0.3)
+        m.chromosomes[0].g_delta_scaled[1] = 0.05
+    o = pickle.loads(pickle.dumps({"model": m, "loss": alg.loss, "algorithm": alg}))
+    m2, loss2, alg2 = o["model"], o["loss"], o["algorithm"]
+    assert (loss2.model is m2) and (alg2.model is m2) and (alg2.loss is loss2)
+    assert [n for n, _ in m2.named_parameters()] == [n for n, _ in m.named_parameters()]
+    assert (m2.event_names(), m2.fixed_origins, m2.component_labels()) == \
+           (m.event_names(), m.fixed_origins, m.component_labels())
+    assert m2.events.p_fire.item() == 0.3
+    with torch.no_grad():
+        assert loss2().item() == pytest.approx(alg.loss().item(), rel=1e-12)
+    # The firing pattern models of the unpickled mixture use its parameters, so gradients reach them
+    params2 = alg2.make_parameters()
+    alg2.evaluate_model_for_parameters(params2)
+    assert all(torch.all(torch.isfinite(p.grad)) for p in params2)
+    assert m2.events.p_fire.grad.abs().item() > 0.0 and m2.chromosomes[0].g_delta_scaled.grad[1].abs().item() > 0.0
 
 
 def test_model_without_feature_names():
