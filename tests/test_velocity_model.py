@@ -81,6 +81,8 @@ def make_chromosome(s: Scenario, name: str) -> ChromosomeModel:
         origin_names=[f"{name}.ori{i}" for i in range(len(s.origins))],
         g_xranges_l=torch.tensor(s.g_xranges_l, dtype=torch.int32),
         g_xranges_u=torch.tensor(s.g_xranges_u, dtype=torch.int32),
+        g_names=[f"site{i + 1}" for i in range(len(s.g_xranges_l))],
+        g_strands=torch.zeros(len(s.g_xranges_l), dtype=torch.int32),
         g_delayscale=dtensor(s.g_delayscale) if s.g_delayscale is not None else None)
 
 
@@ -93,6 +95,8 @@ def make_model(s: Scenario) -> VelocityModel:
         h_tgrid=dtensor(s.h_tgrid),
         g_xranges_l=torch.tensor(s.g_xranges_l, dtype=torch.int32),
         g_xranges_u=torch.tensor(s.g_xranges_u, dtype=torch.int32),
+        g_names=[f"site{i + 1}" for i in range(len(s.g_xranges_l))],
+        g_strands=torch.zeros(len(s.g_xranges_l), dtype=torch.int32),
         v0_min=dtensor([1.0]), v0_max=dtensor([1000.0]),
         g_delayscale=dtensor(s.g_delayscale) if s.g_delayscale is not None else None)
     set_parameters(s, m.temporal, m.chromosomes[0])
@@ -577,6 +581,29 @@ def test_g_range_passage_times_match_reference(s: Scenario):
     # The delay is the fraction 1 - 1/g of the passage time
     g = 1.0 + np.array(s.g_delta)
     np.testing.assert_allclose(delay, time * (1.0 - 1.0 / g), rtol=1e-12)
+
+
+def test_g_names_and_strands():
+    s = Scenario("names", 20000, True, [2000, 15000],
+                 g_xranges_l=[4000, 8000], g_xranges_u=[5000, 9000], g_delta=[1.0, 2.0])
+
+    def make(names, strands):
+        return ChromosomeModel("chr", s.genome_length, s.is_circular,
+                               origins=torch.tensor(s.origins, dtype=torch.int32), origin_names=["a", "b"],
+                               g_xranges_l=torch.tensor(s.g_xranges_l, dtype=torch.int32),
+                               g_xranges_u=torch.tensor(s.g_xranges_u, dtype=torch.int32),
+                               g_names=names, g_strands=torch.tensor(strands, dtype=torch.int32))
+
+    c = make(["terA", "rrnB"], [1, -1])
+    assert c.g_names == ["terA", "rrnB"]
+    assert c.g_strands.tolist() == [1, -1]
+    # One name and one strand per g range, strands must be +1, -1 or 0
+    with pytest.raises(AssertionError):
+        make(["terA"], [1, -1])
+    with pytest.raises(AssertionError):
+        make(["terA", "rrnB"], [1])
+    with pytest.raises(AssertionError):
+        make(["terA", "rrnB"], [1, 2])
 
 
 @pytest.mark.parametrize("l, u", [(8000, 10500), (8999, 9001)])

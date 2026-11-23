@@ -477,6 +477,8 @@ MODEL = model.VelocityModel(
         origin_names=[o.name for o in ORIGINS if o.chr == chr],
         g_xranges_l=pt.tensor([f.begin for f in VX_FEATURES if f.chr == chr], dtype=pt.int32),
         g_xranges_u=pt.tensor([f.end for f in VX_FEATURES if f.chr == chr], dtype=pt.int32),
+        g_names=[f.name for f in VX_FEATURES if f.chr == chr],
+        g_strands=pt.tensor([f.strand for f in VX_FEATURES if f.chr == chr], dtype=pt.int32),
         g_delayscale=pt.tensor([f.delayscale for f in VX_FEATURES if f.chr == chr], dtype=pt.float64))
       for chr in CHROMOSOME_NAMES ])
 MODEL.temporal.growthrate[0] = ARGS.growthrate / 3600

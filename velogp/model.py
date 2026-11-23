@@ -650,6 +650,7 @@ class ChromosomeModel(nn.Module):
     def __init__(self, name: str, length: int, is_circular: bool,
                  origins: IntTensor, origin_names: list[str],
                  g_xranges_l: IntTensor, g_xranges_u: IntTensor,
+                 g_names: list[str], g_strands: IntTensor,
                  g_delayscale: DoubleTensor | None = None):
         super().__init__()
         with no_grad():
@@ -695,6 +696,14 @@ class ChromosomeModel(nn.Module):
                 raise ValueError(f"origin {origin_names[j]} at {self.origins[j].item()} lies inside g range "
                                  f"[{self.g_xranges_l[i].item()}, {self.g_xranges_u[i].item()})")
             self.g_xranges_len = self.g_xranges_u - self.g_xranges_l
+            # Names of the g ranges and the strands they lie on (+1 forward, -1 reverse, 0 unstranded)
+            assert len(g_names) == numel(self.g_xranges_l), "g_names must contain one name per g range"
+            self.g_names = list(g_names)
+            assert (g_strands.dim() == 1) and (numel(g_strands) == numel(self.g_xranges_l)), \
+                "g_strands must contain one strand per g range"
+            assert all((g_strands == 1) | (g_strands == -1) | (g_strands == 0)).item(), "strands must be +1, -1 or 0"
+            self.g_strands = g_strands.to(torch.int32)
+            self.g_strands.requires_grad = False
             # Grid on which g(x) is defined, i.e. the grid
             # [ l_1, u_1, l_2, u_2, .... ] where l = from g_xranges_l, u = g_xranges_u
             self.g_xgrid = cat((tensor([0]), flatten(stack((self.g_xranges_l, self.g_xranges_u), dim=1))))
@@ -1526,13 +1535,14 @@ class VelocityModel(nn.Module):
                           origins: IntTensor, origin_names: list[str],
                           h_tgrid: DoubleTensor,
                           g_xranges_l: IntTensor, g_xranges_u: IntTensor,
+                          g_names: list[str], g_strands: IntTensor,
                           v0_min: DoubleTensor, v0_max: DoubleTensor,
                           g_delayscale: DoubleTensor | None = None,
                           name: str = "chromosome") -> VelocityModel:
         """ Creates a model for a genome comprising a single chromosome """
         temporal = TemporalModel(h_tgrid, v0_min, v0_max)
         chromosome = ChromosomeModel(name, genome_length, is_circular, origins, origin_names,
-                                     g_xranges_l, g_xranges_u, g_delayscale)
+                                     g_xranges_l, g_xranges_u, g_names, g_strands, g_delayscale)
         return cls(temporal, [chromosome])
 
     def __setattr__(self, name: str, value: Any):
