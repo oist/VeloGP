@@ -37,6 +37,46 @@ def grid_index(grid: Tensor, x: Tensor) -> Tensor:
         return (torch.searchsorted(g, v, right=True) - 1).reshape(x.shape)
 
 
+# Pickling
+#
+# The model classes and the loss are pickled as a small, versioned state comprising only what cannot be recomputed:
+# the structure of the model (genome, origins, g ranges, time grid, observations), hyperparameters and the values of
+# the (fitted) parameters. Unpickling calls the constructor with the stored structure, so that all derived members
+# (lookup grids, prefactors, pre-processed inputs, caches) are recomputed by the current code and members added to
+# the classes later receive their default values. Pickles written before this scheme was introduced contain the raw
+# attribute dictionary of each object instead, these are converted by the `_state_from_legacy()` methods.
+
+# Version of the pickled state of the model classes and the loss. Increase when the meaning of a stored field
+# changes, and convert older states in the respective __setstate__() method.
+STATE_VERSION = 1
+
+
+def _legacy_attr(d: dict, name: str, default: Any = None) -> Any:
+    """ Looks up an attribute in the raw attribute dictionary of an `nn.Module` pickled before STATE_VERSION 1 """
+    for k in ("_parameters", "_buffers", "_modules"):
+        if (k in d) and (name in d[k]):
+            return d[k][name]
+    return d.get(name, default)
+
+
+def _parameter_names(module: nn.Module, names: List[str]) -> List[str]:
+    """ The names among `names` of the attributes of `module` which are currently `nn.Parameter` instances """
+    return [n for n in names if isinstance(getattr(module, n), nn.Parameter)]
+
+
+def _check_state_version(state: dict, cls: type):
+    if state["version"] > STATE_VERSION:
+        raise RuntimeError(f"cannot unpickle {cls.__name__}: the pickle was written by a newer version of VeloGP "
+                           f"(state version {state['version']} > {STATE_VERSION})")
+
+
+def _restore_tensors(module: nn.Module, state: dict, names: List[str]):
+    """ Assigns the stored tensors `names` to `module`, turning those listed in state["parameters"] into parameters """
+    for n in names:
+        v = state[n].detach().clone()
+        setattr(module, n, nn.Parameter(v) if n in state["parameters"] else v)
+
+
 class TemporalModel(nn.Module):
     """
     The time-dependent part v(t) = v0 * h(t) of the replication velocity v(x,t) = v(t) / g(x)
@@ -603,6 +643,58 @@ class TemporalModel(nn.Module):
         else:
             raise RuntimeError("no prior distribution defined for this parameter")
 
+    # Fitted parameters, see "Pickling" above
+    STATE_PARAMETERS = ["v0_log", "h_log_raw"]
+
+    def __getstate__(self) -> dict:
+        """
+        The state stored when pickling, see "Pickling" above
+
+        h(t) is stored in the canonical basis, together with the basis h_log_raw is represented in. The eigenbasis
+        and Cholesky factorization of its covariance, which the other bases require, are recomputed when unpickling.
+        """
+        with no_grad():
+            h_log_canonical = self.h_log("canonical").detach().clone()
+        return dict(version=STATE_VERSION, h_tgrid=self.h_tgrid, v0_min=self.v0_min, v0_max=self.v0_max,
+                    growthrate=self.growthrate, h_cov_function=self.h_cov_function, h_timescale=self.h_timescale,
+                    h_sigma=self.h_sigma, h_basis=self.h_basis, v0_log=self.v0_log.detach(),
+                    h_log_canonical=h_log_canonical,
+                    parameters=_parameter_names(self, self.STATE_PARAMETERS), training=self.training)
+
+    @staticmethod
+    def _state_from_legacy(d: dict) -> dict:
+        """ Converts the raw attribute dictionary of an instance pickled before STATE_VERSION 1 """
+        # Restore the old instance as-is to obtain h(t) in the canonical basis, using the caches pickled with it
+        old = TemporalModel.__new__(TemporalModel)
+        nn.Module.__setstate__(old, dict(d))
+        with no_grad():
+            h_log_canonical = old.h_log("canonical").detach().clone()
+        state = { n: _legacy_attr(d, n) for n in ["h_tgrid", "v0_min", "v0_max", "growthrate", "h_cov_function",
+                                                 "h_timescale", "h_sigma", "h_basis", "v0_log"] }
+        state.update(version=1, h_log_canonical=h_log_canonical, training=d.get("training", True),
+                     parameters=[n for n in TemporalModel.STATE_PARAMETERS if n in d.get("_parameters", {})])
+        return state
+
+    def __setstate__(self, state: dict):
+        """ Restores a pickled instance, see "Pickling" above """
+        if "version" not in state:
+            state = self._state_from_legacy(state)
+        _check_state_version(state, TemporalModel)
+        TemporalModel.__init__(self, state["h_tgrid"].clone(), state["v0_min"].clone(), state["v0_max"].clone())
+        with no_grad():
+            self.growthrate = state["growthrate"].clone()
+            self.h_cov_function = state["h_cov_function"]
+            self.h_timescale = state["h_timescale"].clone()
+            self.h_sigma = state["h_sigma"].clone()
+            v0_log = state["v0_log"].detach().clone()
+            self.v0_log = nn.Parameter(v0_log) if "v0_log" in state["parameters"] else v0_log
+            # The constructor sets the canonical basis, switch to the stored basis afterwards (which preserves
+            # whether h_log_raw is a parameter)
+            h_log = state["h_log_canonical"].detach().clone()
+            self.h_log_raw = nn.Parameter(h_log) if "h_log_raw" in state["parameters"] else h_log
+        self.h_switch_basis(state["h_basis"])
+        self.training = state["training"]
+
 class ChromosomeModel(nn.Module):
     """
     The position-dependent part of the model of replisome movement on a single chromosome
@@ -696,7 +788,8 @@ class ChromosomeModel(nn.Module):
                 raise ValueError(f"origin {origin_names[j]} at {self.origins[j].item()} lies inside g range "
                                  f"[{self.g_xranges_l[i].item()}, {self.g_xranges_u[i].item()})")
             self.g_xranges_len = self.g_xranges_u - self.g_xranges_l
-            # Names of the g ranges and the strands they lie on (+1 forward, -1 reverse, 0 unstranded)
+            # Names of the g ranges and the strands they lie on (+1 forward, -1 reverse, 0 unstranded). Models
+            # unpickled from files written before names and strands existed have g_names None and all strands 0.
             assert len(g_names) == numel(self.g_xranges_l), "g_names must contain one name per g range"
             self.g_names = list(g_names)
             assert (g_strands.dim() == 1) and (numel(g_strands) == numel(self.g_xranges_l)), \
@@ -1539,6 +1632,67 @@ class ChromosomeModel(nn.Module):
         else:
             raise RuntimeError("no prior distribution defined for this parameter")
 
+    # Fitted parameters and other tensors which are not determined by the constructor arguments, see "Pickling" above
+    STATE_TENSORS = ["delay_scaled", "g_delta_scaled", "g_blocked_fwd", "g_blocked_rev"]
+
+    def __getstate__(self) -> dict:
+        """ The state stored when pickling, see "Pickling" above """
+        return dict(version=STATE_VERSION, name=self.name, length=int(self.length.item()), is_circular=self.is_circular,
+                    origins=self.origins, origin_names=self.origin_names,
+                    g_xranges_l=self.g_xranges_l, g_xranges_u=self.g_xranges_u,
+                    g_names=self.g_names, g_strands=self.g_strands, g_delayscale=self.g_delayscale,
+                    reference_length=self.reference_length,
+                    **{n: getattr(self, n).detach() for n in self.STATE_TENSORS},
+                    parameters=_parameter_names(self, self.STATE_TENSORS), training=self.training)
+
+    @staticmethod
+    def _state_from_legacy(d: dict) -> dict:
+        """
+        Converts the raw attribute dictionary of an instance pickled before STATE_VERSION 1
+
+        Instances pickled before g_names and g_strands existed have g_names None and all strands 0 (unstranded).
+        Instances pickled before blocked g ranges existed have no blocked ranges.
+        """
+        g_l = _legacy_attr(d, "g_xranges_l")
+        length = _legacy_attr(d, "length")
+        none_blocked = zeros(g_l.shape, dtype=torch.bool)
+        state = dict(version=1, name=_legacy_attr(d, "name"), length=int(length.reshape(-1)[0].item()),
+                     is_circular=_legacy_attr(d, "is_circular"), origins=_legacy_attr(d, "origins"),
+                     origin_names=_legacy_attr(d, "origin_names"),
+                     g_xranges_l=g_l, g_xranges_u=_legacy_attr(d, "g_xranges_u"),
+                     g_names=_legacy_attr(d, "g_names"),
+                     g_strands=_legacy_attr(d, "g_strands", zeros(g_l.shape, dtype=torch.int32)),
+                     g_delayscale=_legacy_attr(d, "g_delayscale"),
+                     reference_length=_legacy_attr(d, "reference_length", length),
+                     delay_scaled=_legacy_attr(d, "delay_scaled"), g_delta_scaled=_legacy_attr(d, "g_delta_scaled"),
+                     g_blocked_fwd=_legacy_attr(d, "g_blocked_fwd", none_blocked),
+                     g_blocked_rev=_legacy_attr(d, "g_blocked_rev", none_blocked),
+                     parameters=[n for n in ChromosomeModel.STATE_TENSORS if n in d.get("_parameters", {})],
+                     training=d.get("training", True))
+        return state
+
+    def __setstate__(self, state: dict):
+        """ Restores a pickled instance, see "Pickling" above """
+        if "version" not in state:
+            state = self._state_from_legacy(state)
+        _check_state_version(state, ChromosomeModel)
+        g_names = state["g_names"]
+        n_ranges = state["g_xranges_l"].numel()
+        ChromosomeModel.__init__(self, state["name"], state["length"], state["is_circular"],
+                                 origins=state["origins"].clone(), origin_names=list(state["origin_names"]),
+                                 g_xranges_l=state["g_xranges_l"].clone(), g_xranges_u=state["g_xranges_u"].clone(),
+                                 g_names=list(g_names) if g_names is not None else [""] * n_ranges,
+                                 g_strands=state["g_strands"].clone(),
+                                 g_delayscale=state["g_delayscale"].clone() if state["g_delayscale"] is not None else None)
+        if g_names is None:
+            # Pickled before g ranges had names
+            self.g_names = None
+        self.set_reference_length(state["reference_length"])
+        with no_grad():
+            _restore_tensors(self, state, self.STATE_TENSORS)
+        self.training = state["training"]
+
+
 class VelocityModel(nn.Module):
     """
     Model of replisome movement on a genome comprising one or more chromosomes
@@ -2010,6 +2164,30 @@ class VelocityModel(nn.Module):
         return inverse(u), pmap
         
 
+    def __getstate__(self) -> dict:
+        """ The state stored when pickling, see "Pickling" above """
+        return dict(version=STATE_VERSION, temporal=self.temporal, chromosomes=list(self.chromosomes),
+                    training=self.training)
+
+    @staticmethod
+    def _state_from_legacy(d: dict) -> dict:
+        """ Converts the raw attribute dictionary of an instance pickled before STATE_VERSION 1 """
+        modules = d.get("_modules", {})
+        if "chromosomes" not in modules:
+            raise RuntimeError("cannot unpickle VelocityModel: the pickle was written by a version of VeloGP which "
+                               "did not support multiple chromosomes")
+        return dict(version=1, temporal=modules["temporal"], chromosomes=list(modules["chromosomes"]),
+                    training=d.get("training", True))
+
+    def __setstate__(self, state: dict):
+        """ Restores a pickled instance, see "Pickling" above """
+        if "version" not in state:
+            state = self._state_from_legacy(state)
+        _check_state_version(state, VelocityModel)
+        VelocityModel.__init__(self, state["temporal"], state["chromosomes"])
+        self.training = state["training"]
+
+
 class VelocityModelLoss(nn.Module):
     """
     The negative log-posterior of the model parameters given observed abundances y_obs (with standard errors s_obs)
@@ -2134,3 +2312,31 @@ class VelocityModelLoss(nn.Module):
         return r3
         
         
+
+
+    def __getstate__(self) -> dict:
+        """
+        The state stored when pickling, see "Pickling" above
+
+        Fitted parameters are stored by name, since their identity is not preserved by pickling the model.
+        """
+        params = [n for n, p in self.model.resolve_params(self.params, strict=False)] \
+            if not builtins.all(isinstance(p, str) for p in self.params) else list(self.params)
+        return dict(version=STATE_VERSION, x=self.x, y_obs=self.y_obs, s_obs=self.s_obs, model=self.model,
+                    params=params, chromosome=self.chromosome, training=self.training)
+
+    @staticmethod
+    def _state_from_legacy(d: dict) -> dict:
+        """ Converts the raw attribute dictionary of an instance pickled before STATE_VERSION 1 """
+        return dict(version=1, x=d["x"], y_obs=d["y_obs"], s_obs=d["s_obs"], model=_legacy_attr(d, "model"),
+                    params=d["params"], chromosome=d.get("chromosome"), training=d.get("training", True))
+
+    def __setstate__(self, state: dict):
+        """ Restores a pickled instance, see "Pickling" above. The input is pre-processed again. """
+        if "version" not in state:
+            state = self._state_from_legacy(state)
+        _check_state_version(state, VelocityModelLoss)
+        VelocityModelLoss.__init__(self, state["x"].clone(), state["y_obs"].clone(), state["s_obs"].clone(),
+                                   state["model"], state["params"],
+                                   chromosome=state["chromosome"].clone() if state["chromosome"] is not None else None)
+        self.training = state["training"]
