@@ -56,6 +56,14 @@ class Scenario:
     g_delayscale: list[float] | None = None
     # Origin firing delays (physical time), defaults to all zero
     delay: list[float] | None = None
+    # Directions in which each g range is blocked (i.e. cannot be passed by replisomes), "none", "fwd" (blocks
+    # replisomes moving in direction +1), "rev" (direction -1) or "both". Defaults to none
+    g_blocked: list[str] | None = None
+
+    def blocked(self, direction: int) -> list[bool]:
+        """ Which g ranges are blocked for replisomes moving in the given direction """
+        dirs = {+1: ("fwd", "both"), -1: ("rev", "both")}[direction]
+        return [b in dirs for b in (self.g_blocked or ["none"] * len(self.g_xranges_l))]
 
     @property
     def delays(self) -> list[float]:
@@ -71,6 +79,10 @@ def set_parameters(s: Scenario, temporal: TemporalModel, chromosome: ChromosomeM
         temporal.h_log_raw = torch.log(dtensor(s.h_values))
         chromosome.g_delta = dtensor(s.g_delta)
         chromosome.set_delay(temporal, dtensor(s.delays))
+    if s.g_blocked is not None:
+        assert all(b in ("none", "fwd", "rev", "both") for b in s.g_blocked)
+        chromosome.g_blocked_fwd = torch.tensor(s.blocked(+1), dtype=torch.bool)
+        chromosome.g_blocked_rev = torch.tensor(s.blocked(-1), dtype=torch.bool)
 
 
 def make_chromosome(s: Scenario, name: str) -> ChromosomeModel:
@@ -125,6 +137,13 @@ def reference_replication_times(s: Scenario, return_owner: bool = False) -> np.n
     g_bp = np.ones(L)
     for l, u, d in zip(s.g_xranges_l, s.g_xranges_u, s.g_delta):
         g_bp[l:u] = 1.0 + d
+    # Blocked g ranges take infinitely long to pass for replisomes moving in the blocked direction
+    g_bp_dir = {}
+    for direction in (+1, -1):
+        g_bp_dir[direction] = g_bp.copy()
+        for l, u, b in zip(s.g_xranges_l, s.g_xranges_u, s.blocked(direction)):
+            if b:
+                g_bp_dir[direction][l:u] = np.inf
 
     def h(t: float) -> float:
         return s.h_values[bisect.bisect_right(s.h_tgrid, t) - 1]
@@ -149,12 +168,13 @@ def reference_replication_times(s: Scenario, return_owner: bool = False) -> np.n
                 t_rep[p], owner[p] = t, (i, direction)
             for _ in range(steps):
                 cell = x if direction > 0 else x - 1
-                t += g_bp[cell % L] / (s.v0 * h(t))
+                t += g_bp_dir[direction][cell % L] / (s.v0 * h(t))
                 x += direction
                 p = x % L if s.is_circular else x
                 if t < t_rep[p]:
                     t_rep[p], owner[p] = t, (i, direction)
-    assert np.all(np.isfinite(t_rep))
+    # Only blocked g ranges can leave positions unreplicated
+    assert np.all(np.isfinite(t_rep)) or any(s.blocked(+1) + s.blocked(-1))
     return (t_rep, owner) if return_owner else t_rep
 
 
@@ -963,3 +983,154 @@ def test_v0_proper_invariant_under_v0_h_rescaling():
         temporal.v0, temporal.h_log_raw = dtensor(200.0), h_log - math.log(4.0)
         b = temporal.v0_proper(dtensor(30.0)).item()
     assert a == pytest.approx(b, rel=1e-12)
+
+
+# Blocked g ranges cannot be passed by replisomes moving in the blocked direction
+BLOCKED_SCENARIOS = [
+    Scenario("circular, range blocked in both directions", 20000, True, [2000, 9000, 15000],
+             h_tgrid=H_TGRID, h_values=H_VARYING,
+             g_xranges_l=[500, 4000, 12000], g_xranges_u=[1500, 6000, 12500], g_delta=[1.0, 0.5, 3.0],
+             g_blocked=["none", "both", "none"]),
+    # The forward replisome of the origin at 2000 reaches the range first and stalls, the reverse replisome of
+    # the origin at 9000 passes it and replicates the range and everything up to its left end
+    Scenario("circular, one-way block stalls the replisome reaching it first", 20000, True, [2000, 9000, 15000],
+             h_tgrid=H_TGRID, h_values=H_VARYING,
+             g_xranges_l=[500, 4000, 12000], g_xranges_u=[1500, 6000, 12500], g_delta=[1.0, 0.5, 3.0],
+             g_blocked=["none", "fwd", "none"]),
+    # The reverse replisome of the origin at 9000 is the one reaching the range first, but passes it
+    Scenario("circular, one-way block passed by the replisome reaching it first", 20000, True, [2000, 9000, 15000],
+             g_xranges_l=[7000], g_xranges_u=[7500], g_delta=[1.0], g_blocked=["fwd"]),
+    Scenario("circular, reverse one-way block", 20000, True, [2000, 9000, 15000],
+             h_tgrid=H_TGRID, h_values=H_VARYING,
+             g_xranges_l=[3000, 13000], g_xranges_u=[3500, 14000], g_delta=[0.5, 1.0],
+             g_blocked=["rev", "rev"]),
+    Scenario("circular, blocked ranges ending and starting at an origin", 20000, True, [2000, 9000, 15000],
+             g_xranges_l=[8000, 9000], g_xranges_u=[9000, 10500], g_delta=[1.0, 2.0],
+             g_blocked=["both", "fwd"]),
+    # The forward replisome is blocked at 8000, the reverse replisome (wrapping around the chromosome end) at 12500
+    Scenario("circular, unreachable region", 20000, True, [5000],
+             g_xranges_l=[8000, 12000], g_xranges_u=[8500, 12500], g_delta=[0.0, 1.0],
+             g_blocked=["fwd", "rev"]),
+    Scenario("circular, block prevents passive replication", 20000, True, [2000, 9000, 11000],
+             g_xranges_l=[10000], g_xranges_u=[10500], g_delta=[0.5], delay=[0.0, 0.0, 400.0],
+             g_blocked=["both"]),
+    Scenario("circular, all combined, blocked", 20000, True, [1000, 7000, 12000, 16000], v0=15.0,
+             h_tgrid=H_TGRID, h_values=H_VARYING,
+             g_xranges_l=[3000, 12000, 18000], g_xranges_u=[4000, 12600, 19500], g_delta=[1.5, 0.7, 2.5],
+             delay=[30.0, 0.0, 120.0, 260.0], g_blocked=["rev", "none", "both"]),
+    Scenario("linear, blocked ranges", 20000, False, [3000, 10000, 16000],
+             g_xranges_l=[1000, 6000, 18000], g_xranges_u=[2000, 7500, 19500], g_delta=[2.0, 1.0, 0.5],
+             g_blocked=["none", "both", "fwd"]),
+    Scenario("linear, one-way blocks", 20000, False, [3000, 10000, 16000], v0=15.0,
+             h_tgrid=H_TGRID, h_values=H_VARYING,
+             g_xranges_l=[4000, 11000], g_xranges_u=[4500, 12000], g_delta=[1.0, 0.5], delay=[0.0, 60.0, 20.0],
+             g_blocked=["rev", "fwd"]),
+    Scenario("linear, unreachable chromosome end", 20000, False, [6000],
+             h_tgrid=H_TGRID, h_values=H_VARYING,
+             g_xranges_l=[10000], g_xranges_u=[11000], g_delta=[1.0], g_blocked=["fwd"]),
+]
+
+
+def blocked_scenario(name: str) -> Scenario:
+    return next(s for s in BLOCKED_SCENARIOS if s.name == name)
+
+
+def with_blocked(s: Scenario, blocked: list[str] | None) -> Scenario:
+    return Scenario(**{**s.__dict__, "g_blocked": blocked})
+
+
+@pytest.mark.parametrize("s", BLOCKED_SCENARIOS, ids=[s.name for s in BLOCKED_SCENARIOS])
+def test_blocked_forward_matches_euler_reference(s: Scenario):
+    m = make_model(s)
+    assert_profile_matches_reference(s, m)
+    # Ranges blocked in both directions are never passed, their interior is reached by no replisome
+    with torch.no_grad():
+        p = m.forward(model_positions(s))
+    for l, u, b in zip(s.g_xranges_l, s.g_xranges_u, s.g_blocked):
+        if b == "both":
+            assert torch.all(p[l + 1:u] == 0.0)
+            assert (p[l] > 0.0) or (p[u] > 0.0)
+
+
+def test_one_way_block_stalls_replisome_reaching_it_first():
+    s = blocked_scenario("circular, one-way block stalls the replisome reaching it first")
+    _, owner = reference_replication_times(s, return_owner=True)
+    _, owner_unblocked = reference_replication_times(with_blocked(s, None), return_owner=True)
+    # Without the block, the forward replisome of origin 0 replicates the range. With the block, it stops at the
+    # range's left end and the range is replicated by the reverse replisome of origin 1, which passes it.
+    assert owner_unblocked[5000] == (0, +1)
+    assert owner[4000] == (0, +1)
+    assert all(owner[x] == (1, -1) for x in range(4001, 9000))
+    with torch.no_grad():
+        p = make_model(s).forward(model_positions(s))
+    assert torch.all(p > 0.0)
+
+
+def test_one_way_block_without_effect():
+    """ A block in the direction of a replisome which never reaches the range has no effect """
+    s = blocked_scenario("circular, one-way block passed by the replisome reaching it first")
+    x = model_positions(s)
+    with torch.no_grad():
+        torch.testing.assert_close(make_model(s).forward(x), make_model(with_blocked(s, None)).forward(x),
+                                   rtol=0, atol=0)
+        # Blocking the other direction instead does have an effect
+        assert not torch.equal(make_model(with_blocked(s, ["rev"])).forward(x),
+                               make_model(with_blocked(s, None)).forward(x))
+
+
+def test_blocked_unreachable_positions():
+    s = blocked_scenario("circular, unreachable region")
+    with torch.no_grad():
+        p = make_model(s).forward(model_positions(s))
+    # The stretch between the two blocked ranges contains no origin and is never replicated
+    assert torch.all(p[8001:12500] == 0.0)
+    assert torch.all(p[:8001] > 0.0) and torch.all(p[12500:] > 0.0)
+
+
+@pytest.mark.parametrize("blocked", [["none", "none", "none"], ["none", "rev", "none"], ["none", "both", "none"],
+                                     ["rev", "fwd", "none"]])
+def test_blocking_detected_by_reference(blocked: list[str]):
+    """ Sanity check of the test itself: the comparison must fail if different ranges or directions are blocked """
+    s = blocked_scenario("circular, one-way block stalls the replisome reaching it first")
+    with pytest.raises(AssertionError):
+        assert_profile_matches_reference(s, make_model(with_blocked(s, blocked)))
+
+
+def test_blocked_prepared_input_remains_valid():
+    """ The blocked ranges are not part of the prepared input, so it remains valid when they change """
+    s = blocked_scenario("circular, all combined, blocked")
+    m = make_model(with_blocked(s, None))
+    c = m.chromosomes[0]
+    x = model_positions(s)
+    x_prep = m.prepare_input(x)
+    with torch.no_grad():
+        p_unblocked = m.forward(x_prep)
+        c.g_blocked_fwd = torch.tensor(s.blocked(+1))
+        c.g_blocked_rev = torch.tensor(s.blocked(-1))
+        torch.testing.assert_close(m.forward(x_prep), m.forward(x), rtol=0, atol=0)
+        assert not torch.equal(m.forward(x_prep), p_unblocked)
+        c.g_blocked_fwd = torch.zeros(len(s.g_blocked), dtype=torch.bool)
+        c.g_blocked_rev = torch.zeros(len(s.g_blocked), dtype=torch.bool)
+        torch.testing.assert_close(m.forward(x_prep), p_unblocked, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("s", BLOCKED_SCENARIOS, ids=[s.name for s in BLOCKED_SCENARIOS])
+def test_blocked_gradients_finite(s: Scenario):
+    m = make_model(s)
+    c = m.chromosomes[0]
+    params = [m.temporal.v0_log, m.temporal.h_log_raw, c.g_delta_scaled, c.delay_scaled]
+    for p in params:
+        p.requires_grad_(True)
+    torch.sum(m.forward(model_positions(s))).backward()
+    for p in params:
+        assert torch.all(torch.isfinite(p.grad))
+    assert m.temporal.v0_log.grad.item() != 0.0
+
+
+@pytest.mark.parametrize("blocked", [["none", "fwd", "none"], ["rev", "none", "none"]])
+def test_blocked_unsupported_methods(blocked: list[str]):
+    m = make_model(with_blocked(blocked_scenario("circular, range blocked in both directions"), blocked))
+    for method in (m.trajectories, m.completion_time, m.g_range_passage_times, m.g_range_forks,
+                   m.g_range_block_probability):
+        with pytest.raises(RuntimeError, match="blocked"):
+            method()

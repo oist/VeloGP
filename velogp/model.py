@@ -724,6 +724,12 @@ class ChromosomeModel(nn.Module):
             self.reference_length = self.length
             self.g_delta_prefactor = self.compute_g_delta_prefactor(self.reference_length)
             self.g_delta_scaled.requires_grad = False
+            # Blocked g ranges cannot be passed by replisomes moving in the blocked direction, i.e. their delay is
+            # infinite for these replisomes, see `g_path_blocked()`. g_blocked_fwd blocks replisomes moving in
+            # direction +1 (towards increasing coordinates), g_blocked_rev those moving in direction -1. These are
+            # not parameters, they are part of the structure of the model.
+            self.g_blocked_fwd = zeros(self.g_xranges_l.size(), dtype=torch.bool)
+            self.g_blocked_rev = zeros(self.g_xranges_l.size(), dtype=torch.bool)
 
     def compute_g_delta_prefactor(self, reference_length: Tensor) -> Tensor:
         """ The scale of g_delta for each g range, i.e. the expected value of g_delta under its prior """
@@ -855,6 +861,7 @@ class ChromosomeModel(nn.Module):
         :param temporal: The time-dependent part of the model
         :return: list of segments
         """
+        self.assert_unblocked("segments()")
         delay = self.delay(temporal)
         k = 2*numel(self.origins)
         result = []
@@ -932,6 +939,7 @@ class ChromosomeModel(nn.Module):
         return max(stack([seg.t_meet.reshape(()) for seg in self.segments(temporal)]))
 
     def trajectories(self, temporal: TemporalModel, t: Tensor = None) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        self.assert_unblocked("trajectories()")
         # Use grid on which h() is defined if no output times are specified
         if t is None:
             t = temporal.h_tgrid
@@ -1053,20 +1061,85 @@ class ChromosomeModel(nn.Module):
         #   G^-1(z) = z_i + (z - G(z_i)) / g[i]
         return self.g_xgrid[idx] + (z - G[idx]) / g[idx]
 
+    @property
+    def any_blocked(self) -> bool:
+        """ Whether any g range is blocked in any direction """
+        return (any(self.g_blocked_fwd) or any(self.g_blocked_rev)).item()
+
+    def assert_unblocked(self, method: str):
+        """ Raises an error if any g range is blocked, for methods which do not support blocked g ranges """
+        if self.any_blocked:
+            raise RuntimeError(f"{method} does not support blocked g ranges")
+
+    def g_blocked_counts(self, mask: Tensor, idx: Tensor, offset: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Counts the g ranges [l, u) selected by `mask` with l < x respectively u <= x for locations x
+
+        :param mask: Boolean tensor selecting g ranges, e.g. `g_blocked_fwd`
+        :param idx: Indices of the grid cells containing the locations, see `g_grid_locate()`
+        :param offset: Offsets of the locations within their grid cells, see `g_grid_locate()`
+        :return: Pair (lt, le) of integer tensors with the same shape as idx
+        """
+        with no_grad():
+            # Grid cell 2*i+1 is g range i, see g_xgrid
+            blocked = cat((tensor([False]), flatten(stack((mask, zeros_like(mask)), dim=1))))
+            counts = cat((tensor([0]), torch.cumsum(blocked.long(), dim=0)))
+            le = counts[idx]
+            lt = le + (blocked[idx] & (offset > 0)).long()
+        return lt, le
+
+    def g_path_blocked(self, x_idx: Tensor, x_offset: Tensor, o_idx: Tensor, o_offset: Tensor,
+                       d: Tensor, wrap: Tensor) -> Tensor:
+        """
+        Whether the path from o to x in direction d enters a g range blocked in that direction
+
+        Paths in direction +1 are blocked by the ranges in `g_blocked_fwd`, paths in direction -1 by those in
+        `g_blocked_rev`. A path enters the range [l, u) if it intersects its interior (l, u), i.e. a replisome coming
+        from the left still reaches l, and one coming from the right still reaches u, but if the range is blocked in
+        its direction, it gets no further. Replisomes moving in the other direction pass the range normally. Locations
+        are passed as grid indices and offsets, see `g_grid_locate()`.
+
+        :param x_idx: Grid cell indices of the end points x
+        :param x_offset: Offsets of the end points x within their grid cells
+        :param o_idx: Grid cell indices of the starting points o
+        :param o_offset: Offsets of the starting points o within their grid cells
+        :param d: Directions of the paths (+1 or -1)
+        :param wrap: Whether the paths wrap around the end of a circular chromosome, see `G()`
+        :return: Boolean tensor of the broadcast shape of the inputs
+        """
+        with no_grad():
+            # Number of blocked ranges intersecting the open interval (a, b) is #{l < b} - #{u <= a}. A path that
+            # wraps around covers (a, L) and [0, b), which adds all blocked ranges.
+            x_lt, _ = self.g_blocked_counts(self.g_blocked_fwd, x_idx, x_offset)
+            _, o_le = self.g_blocked_counts(self.g_blocked_fwd, o_idx, o_offset)
+            n_fwd = x_lt - o_le + where(wrap, torch.sum(self.g_blocked_fwd.long()), 0)
+            _, x_le = self.g_blocked_counts(self.g_blocked_rev, x_idx, x_offset)
+            o_lt, _ = self.g_blocked_counts(self.g_blocked_rev, o_idx, o_offset)
+            n_rev = o_lt - x_le + where(wrap, torch.sum(self.g_blocked_rev.long()), 0)
+            return where(d > 0, n_fwd, n_rev) > 0
+
     def G(self, x: Tensor, o: Tensor, d: Tensor) -> Tensor:
         """
         Evaluates G(x,o) = | int_p g(u) du | for the triples (x, o, d) where p is a path from o to x in direction d.
 
         g(x) is piece-wise constant and = 1 except on the intervals [g_xranges_l[i], g_xranges_u[i]] where g(x) = g[i].
 
+        If the path enters a g range blocked in direction d (see `g_path_blocked()`), G(x,o) is +inf.
+
         :param x:  Genomic locations as a tensor of arbitrary shape
         :param o: Origins as tensor of the same shape as x
         :return: G(x,o) as a tensor of the same shape as x
         """
         result = (self.G_0(x) - self.G_0(o)) * sign(d)
+        wrap = zeros_like(result, dtype=torch.bool)
         if self.is_circular:
             wrap = logical_or(logical_and(x < o, d > tensor([0])), logical_and(o < x, d < tensor([0])))
             result = where(wrap, result + self.G_0(self.length), result)
+        if self.any_blocked:
+            x_idx, x_offset = self.g_grid_locate(x)
+            o_idx, o_offset = self.g_grid_locate(o)
+            blocked = self.g_path_blocked(x_idx, x_offset, o_idx, o_offset, d, wrap)
+            result = where(blocked, dtensor(float('inf')), result)
         return result
 
     def g_fun(self, x: Tensor):
@@ -1140,6 +1213,9 @@ class ChromosomeModel(nn.Module):
         o_(i-1), o_(i+1) reaches o_i, whichever happens first. Replisomes still stop at the adjacent origin, i.e.
         locations beyond o_i are never replicated by the replisomes of o_(i-1) respectively o_(i+1).
 
+        Replisomes cannot pass g ranges blocked in their direction of movement (see `g_path_blocked()`). Locations
+        which no replisome reaches have T(x) = +inf.
+
         :param x: Genomic locations as a tensor of arbitrary shape or as a prepapred input returned by self.prepare_input
         :param temporal: The time-dependent part of the model
         :return: Virtual replication times as a tensor of the same shape
@@ -1150,8 +1226,13 @@ class ChromosomeModel(nn.Module):
         # Virtual times at which the replisomes of the adjacent origins o_(i-1) and o_(i+1) reach origin o_i
         origins_prev, delay_virtual_prev = roll(self.origins, 1), roll(delay_virtual, 1)
         origins_next, delay_virtual_next = roll(self.origins, -1), roll(delay_virtual, -1)
-        arrival_from_prev = delay_virtual_prev + self.G(self.origins, origins_prev, dtensor([+1.0])) / temporal.v0
-        arrival_from_next = delay_virtual_next + self.G(self.origins, origins_next, dtensor([-1.0])) / temporal.v0
+        def over_v0(G: Tensor) -> Tensor:
+            # G is +inf for paths entering a blocked g range. Avoid dividing inf by v0, whose gradient is NaN even
+            # if the result is masked out later.
+            finite = isfinite(G)
+            return where(finite, where(finite, G, 0.0) / temporal.v0, dtensor(float('inf')))
+        arrival_from_prev = delay_virtual_prev + over_v0(self.G(self.origins, origins_prev, dtensor([+1.0])))
+        arrival_from_next = delay_virtual_next + over_v0(self.G(self.origins, origins_next, dtensor([-1.0])))
         if not self.is_circular:
             # The first origin has no left neighbour and the last origin no right neighbour on a linear chromosome
             is_first = arange(numel(self.origins)) == 0
@@ -1192,6 +1273,16 @@ class ChromosomeModel(nn.Module):
             # linear chromosome. Exclude these, otherwise G() is negative and T(x) precedes the origin firing time.
             t_left = where(x_prep.has_left, t_left, dtensor(float('inf')))
             t_right = where(x_prep.has_right, t_right, dtensor(float('inf')))
+        if self.any_blocked:
+            # Replisomes cannot pass g ranges blocked in their direction of movement, see g_path_blocked()
+            o_idx, o_offset = self.g_grid_locate(self.origins)
+            il, ir = x_prep.origin_index_left, x_prep.origin_index_right
+            blocked_left = self.g_path_blocked(x_prep.g_index, x_prep.g_offset, o_idx[il], o_offset[il],
+                                               dtensor(+1.0), x_prep.wrap_left)
+            blocked_right = self.g_path_blocked(x_prep.g_index, x_prep.g_offset, o_idx[ir], o_offset[ir],
+                                                dtensor(-1.0), x_prep.wrap_right)
+            t_left = where(blocked_left, dtensor(float('inf')), t_left)
+            t_right = where(blocked_right, dtensor(float('inf')), t_right)
         return t_left, t_right
 
     def g_range_passage_times(self, temporal: TemporalModel) -> Tuple[Tensor, Tensor]:
@@ -1251,6 +1342,7 @@ class ChromosomeModel(nn.Module):
         times and oi_left, oi_right the indices of the origins. On linear chromosomes, there may be no origin to
         the left or right of a range, the arrival time is then +inf and the origin index -1.
         """
+        self.assert_unblocked("g_range_arrivals()")
         delay_virtual = temporal.H(self.delay(temporal))
         p_prep, q_prep = self.prepare_input(self.g_xranges_l), self.prepare_input(self.g_xranges_u)
         u_left_p, _ = self.fork_arrival_times(p_prep, temporal, delay_virtual)
@@ -1774,7 +1866,12 @@ class VelocityModel(nn.Module):
         self.prepare_input. Passing a tensor is only possible if the genome comprises a single chromosome.
         :return: Predicted DNA abundance
         """
-        return exp(- self.temporal.growthrate * self.temporal.Hinv(self.T(x)))
+        t = self.T(x)
+        # Locations which no replisome reaches (because of blocked g ranges) have T(x) = +inf and abundance 0.
+        # Replace their T(x) by a finite placeholder, otherwise Hinv() and its gradient produce NaNs.
+        reached = isfinite(t)
+        t_safe = where(reached, t, self.temporal.h_tgrid[0])
+        return where(reached, exp(- self.temporal.growthrate * self.temporal.Hinv(t_safe)), 0.0)
 
     def forward(self, x: Tensor | X):
         return self.P(x)
