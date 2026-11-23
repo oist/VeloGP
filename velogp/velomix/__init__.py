@@ -1,2 +1,2 @@
 from .model import MixtureModel, MixtureEvents, Event
-from .fit import FitMixtureModel, make_loss
+from .fit import FitMixtureModel, make_loss, posterior_cov

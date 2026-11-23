@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import copy
 import itertools
+import math
+import pathlib
 import pickle
 
 import numpy as np
@@ -19,8 +21,8 @@ import pytest
 import torch
 from torch import nn
 
-from velogp import ChromosomeModel, TemporalModel, VelocityModel, VelocityModelLoss, dtensor
-from velogp.velomix import MixtureModel, FitMixtureModel, make_loss
+from velogp import ChromosomeModel, TemporalModel, VelocityModel, VelocityModelLoss, FitVelocityModel, dtensor
+from velogp.velomix import MixtureModel, FitMixtureModel, make_loss, posterior_cov
 
 from test_velocity_model import (Scenario, H_TGRID, H_VARYING, make_model, make_chromosome, set_parameters,
                                  model_positions, reference_replication_times, reference_time_tolerance)
@@ -439,3 +441,112 @@ def test_model_without_feature_names():
     MixtureModel(original, [])
     with pytest.raises(ValueError, match="re-run VeloGP"):
         MixtureModel(original, [("site1", "both")])
+
+
+def write_velogp_objects(path):
+    """ Writes the objects of a (simulated) VeloGP fit as VeloGP's --out-objects does """
+    s, strands, sites = FIT_SCENARIO
+    original = make_model(s)
+    original.chromosomes[0].g_strands = torch.tensor(strands, dtype=torch.int32)
+    truth = MixtureModel(original, sites)
+    with torch.no_grad():
+        truth.events.p_fire.fill_(0.4)
+        truth.events.p_stall.fill_(0.6)
+        x = model_positions(s)[::100].clone()
+        y = 1.7 * truth.forward(x)
+    loss = VelocityModelLoss(x.double(), y.clone(), 0.002 * y, original, ["temporal.v0_log"])
+    import gzip
+    with gzip.open(path, "wb") as f:
+        pickle.dump({"model": original, "loss": loss, "algorithm": FitVelocityModel(original, loss)}, f)
+
+
+def run_velomix(*args):
+    import os, subprocess, sys
+    root = pathlib.Path(__file__).parent.parent
+    env = {**os.environ, "PYTHONPATH": str(root), "MPLBACKEND": "Agg"}
+    return subprocess.run([sys.executable, "-m", "velogp.velomix", *map(str, args)], cwd=root, env=env,
+                          capture_output=True, text=True)
+
+
+def test_cli(tmp_path):
+    import pandas as pd
+    objects = tmp_path / "velogp.objs.pkl.gz"
+    write_velogp_objects(objects)
+    out = {k: tmp_path / f"velomix.{k}" for k in ["objs.pkl", "model.pt", "prob", "abd", "vt", "vx", "traj",
+                                                   "abd.pdf", "vt.pdf"]}
+    r = run_velomix(objects, "--stall-sites", "site1:both", "--seed", "1", "--perturbation-rejects", "2",
+                    "--perturbation-min", "0.1",
+                    "--out-objects", out["objs.pkl"], "--out-model", out["model.pt"], "--out-probabilities", out["prob"],
+                    "--out-abundance", out["abd"], "--out-vt", out["vt"], "--out-vx-feature-delays", out["vx"],
+                    "--out-trajectories", out["traj"], "--plot-abundance", out["abd.pdf"], "--plot-vt", out["vt.pdf"])
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ERROR" not in r.stdout, r.stdout
+    assert all(p.exists() for p in out.values())
+    # Probabilities: all origins (ori0 always fires), then the stall sites
+    prob = pd.read_csv(out["prob"], sep="\t")
+    assert prob.name.tolist() == ["ori0", "ori1", "site1"]
+    assert prob.type.tolist() == ["origin", "origin", "stall"]
+    assert prob.fixed.tolist() == [1, 0, 0] and prob.probability[0] == 1.0
+    assert prob.probability[1] == pytest.approx(0.4, abs=0.02) and prob.probability[2] == pytest.approx(0.6, abs=0.02)
+    assert np.isnan(prob.stderr[0]) and np.all(prob.stderr[1:] > 0.0)
+    assert prob.begin.tolist() == [2000, 11000, 5000] and prob.polarity[2] == "both"
+    # Abundances of the mixture and of each component, and the component weights
+    abd = pd.read_csv(out["abd"], sep="\t")
+    labels = ["00", "01", "10", "11"]
+    assert [c for c in abd.columns if c[:2] in ("y.", "w.")] == [f"y.{l}" for l in labels] + [f"w.{l}" for l in labels]
+    w = np.array([abd[f"w.{l}"][0] for l in labels])
+    assert w.sum() == pytest.approx(1.0, abs=1e-5)
+    mix = sum(abd[f"w.{l}"] * abd[f"y.{l}"] for l in labels)
+    np.testing.assert_allclose(mix, abd.y_pred, atol=1e-4)
+    np.testing.assert_allclose(abd.y_pred, abd.y_obs, rtol=0.02)
+    # v(x) delays only for the features which are not stall sites
+    vx = pd.read_csv(out["vx"], sep="\t")
+    assert vx.name.tolist() == ["site2"]
+    assert vx.g[0] == pytest.approx(2.0, abs=0.05)
+    # The objects of the VeloGP fit plus the mixture
+    with open(out["objs.pkl"], "rb") as f:
+        o = pickle.load(f)
+    assert {"model", "loss", "algorithm", "mixture"} <= set(o.keys())
+    mix = o["mixture"]
+    assert isinstance(mix["model"], MixtureModel) and (mix["loss"].model is mix["model"])
+    assert mix["events"] == ["ori1", "site1"] and mix["components"] == labels
+    assert mix["model"].events.p_fire.item() == pytest.approx(prob.probability[1], abs=1e-6)
+    m = torch.load(out["model.pt"], weights_only=False)
+    assert m.event_names() == ["ori1", "site1"]
+
+
+@pytest.mark.parametrize("sites, message", [("nosuchsite", "not a feature"), ("site1:sideways", "invalid polarity"),
+                                            ("site1:co", "unstranded")])
+def test_cli_invalid_stall_sites(tmp_path, sites, message):
+    objects = tmp_path / "velogp.objs.pkl.gz"
+    write_velogp_objects(objects)
+    r = run_velomix(objects, "--stall-sites", sites)
+    assert r.returncode == 2
+    assert message in r.stderr and "Traceback" not in r.stderr
+
+
+def test_posterior_cov_fixed_and_uninformative():
+    """ Fixed entries have NaN variance, entries without any effect on the abundance infinite variance """
+    # Single origin at 2000: the replisomes meet at 12000. site1 blocks only replisomes moving in direction -1
+    # ("head" on the forward strand), but the replisome moving leftwards never reaches it. site2 is passed first
+    # by that replisome and blocks both directions.
+    s = Scenario("posterior", 20000, True, [2000], g_xranges_l=[5000, 14000, 17000], g_xranges_u=[5500, 14500, 18000],
+                 g_delta=[0.0, 0.0, 1.0])
+    original = make_model(s)
+    original.chromosomes[0].g_strands = torch.tensor([1, 0, 0], dtype=torch.int32)
+    m = MixtureModel(original, [("site1", "head"), ("site2", "both")])
+    with torch.no_grad():
+        m.events.p_stall.copy_(dtensor([0.3, 0.6]))
+        x = model_positions(s)[::100].clone()
+        y = m.forward(x)
+    alg = FitMixtureModel(m, make_loss(m, VelocityModelLoss(x.double(), y.clone(), 0.01 * y, original, [])))
+    alg.make_parameters()
+    fixed = {"chromosomes.0.g_delta_scaled": m.stall_ranges[0]}
+    cov, pmap = posterior_cov(m, alg.loss, ["chromosomes.0.g_delta_scaled", "events.p_stall"], fixed)
+    var = torch.diagonal(cov)
+    g, p = pmap["chromosomes.0.g_delta_scaled"], pmap["events.p_stall"]
+    # g of the stall sites is fixed, g of site3 is free
+    assert torch.isnan(var[g]) and torch.isnan(var[g + 1]) and torch.isfinite(var[g + 2]) and var[g + 2] > 0
+    # site1 has no effect, site2 does
+    assert var[p].item() == math.inf
+    assert torch.isfinite(var[p + 1]) and var[p + 1] > 0

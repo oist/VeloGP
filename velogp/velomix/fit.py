@@ -3,10 +3,11 @@ Fitting of the VeloMix mixture model, see `velogp.velomix.model.MixtureModel`
 """
 from __future__ import annotations
 
-from typing import List
+import math
+from typing import Dict, List, Tuple
 
 import torch
-from torch import nn
+from torch import nn, Tensor
 
 from ..fit import FitVelocityModel
 from ..model import VelocityModelLoss
@@ -91,3 +92,37 @@ class FitMixtureModel(FitVelocityModel):
 
     def optimize_parameters(self, *args, **kwargs):
         raise NotImplementedError("VeloMix only supports optimize_parameters_stochastic()")
+
+
+def posterior_cov(model: MixtureModel, loss: VelocityModelLoss, params: List[str],
+                  fixed: Dict[str, Tensor]) -> Tuple[Tensor, Dict[str, int]]:
+    """
+    The posterior covariance of the given parameters, conditional on the entries listed in `fixed`
+
+    Entries which are fixed (stall sites' g) or lie on the boundary of their domain (probabilities 0 or 1) are not
+    free parameters, their rows and columns are removed from the posterior precision matrix before inverting it,
+    and are NaN in the result. Entries which carry no information at all (e.g. the probability of an event which
+    does not affect the predicted abundances, and has no prior) have a zero row in the precision matrix (up to
+    rounding errors, entries whose diagonal element is below 1e-12 times the largest one are considered
+    uninformative). They are removed as well, their variance is +inf.
+
+    :param model: The mixture model
+    :param loss: Its loss function
+    :param params: Parameter names
+    :param fixed: Maps parameter names to boolean masks of the fixed entries
+    """
+    u, pmap = model.posterior_cov_inv(loss, params)
+    keep = torch.ones(u.shape[0], dtype=torch.bool)
+    for n, mask in fixed.items():
+        if n in pmap:
+            keep[pmap[n]:pmap[n] + mask.numel()] = ~mask
+    # Rows of uninformative entries are zero up to rounding errors
+    d = torch.diagonal(u)
+    uninformative = keep & (d <= 1e-12 * torch.max(torch.abs(d)))
+    keep &= ~uninformative
+    cov = torch.full_like(u, math.nan)
+    k = torch.nonzero(keep).reshape(-1)
+    cov[k[:, None], k[None, :]] = torch.linalg.inv(u[k][:, k])
+    i = torch.nonzero(uninformative).reshape(-1)
+    cov[i, i] = math.inf
+    return cov, pmap
