@@ -1,9 +1,10 @@
-# VeloMix: mixture model and output formats
+# VeloMix: mixture model
 
 VeloMix (`python -m velogp.velomix`) takes a finished VeloGP fit and refits it as a mixture of stochastic origin
 firing and replisome stalling.
 
-The deterministic VeloGP model and its output files are described in `velogp.md`.
+The deterministic VeloGP model is described in [velogp.md](velogp.md). Usage examples are in the
+[README](../README.md#fitting-a-velomix-model), and all file formats are listed in [the index](README.md).
 
 ## Model definition
 
@@ -79,73 +80,17 @@ observations; no other input files are needed. The observations (windows, y_obs,
 
 ## Output files
 
-All tables are tab-separated with one header line (gzip/bz2 if the filename ends in `.gz`/`.bz2`). Strand symbols:
-`+`, `-`, `*` (unstranded). Coordinates are 0-based, and ranges are half-open [begin, end) as in BED.
+All tables are tab-separated with one header line (gzip/bz2 if the filename ends in `.gz`/`.bz2`). Except for the
+probabilities and the abundances, the outputs describe the *reference component* (all origins fire, nothing stalls).
 
-### `--out-probabilities`
-One row per origin (all origins, including the fixed ones, in event-order sort), followed by one row per stall site
-in event order.
-
-| column | meaning |
-|---|---|
-| `type` | `origin` or `stall` |
-| `chr` | chromosome name |
-| `begin`, `end` | origin: `pos`, `pos+1`; stall site: feature range |
-| `strand` | origins `*`; stall sites the feature strand |
-| `name` | origin or feature name |
-| `polarity` | origins `NA`; stall sites `both`, `co` or `head` |
-| `probability` | p_fire (origins) or p_stall (stall sites); fixed origins 1 |
-| `stderr` | posterior std. err.; `nan` if fixed or clamped at 0/1, `inf` if uninformative |
-| `fixed` | 1 for origins that always fire, else 0 |
-
-### `--out-abundance`
-One row per data window, in the same order as VeloGP's `--out-abundance`. K = 2^n components.
-
-| column | meaning |
-|---|---|
-| `chr`, `pos` | window chromosome and position (as in VeloGP's `--out-abundance`) |
-| `y_obs`, `y_obs_stderr` | observed abundance and its std. err. `s_obs` (includes the overdispersion term with `--error-model`) |
-| `y_pred` | mixture prediction, scale · P(x) |
-| `p_pred` | unscaled mixture abundance P(x) |
-| `y.<label>` (K columns) | scale · P_k(x) for each component, using the mixture's scale |
-| `w.<label>` (K columns) | component weight w_k (constant down the column) |
-
-The two sets of columns are related by Σ_k `w.<label>` · `y.<label>` = `y_pred`.
-
-### `--out-vt`
-Same layout as VeloGP's `--out-vt`, on the h(t) time grid.
-
-| column | meaning |
-|---|---|
-| `t` | time [s] |
-| `vt`, `vt_stderr` | v(t) and its std. err. |
-| `nforks` | number of active replisomes *in the reference component* |
-| `replicationtime` | C, the completion time of the reference component (constant) |
-
-### `--out-vx-feature-delays`
-Same columns as VeloGP's file of the same name, but stall sites are omitted. Every value refers to the reference
-component.
-
-| column | meaning |
-|---|---|
-| `chr`, `begin`, `end`, `strand`, `length`, `name`, `delayscale` | the feature |
-| `g` | fitted slow-down factor |
-| `delay_bp` | delay in bp, (g − 1)·length |
-| `time_s`, `delay_s` | passage time and delay in seconds |
-| `delay_rel` | `delay_s` / C |
-| `p_block` | equivalent blocking probability |
-| `direction` | traversal direction of the first replisome, relative to the strand |
-| `origin_forward`, `origin_forward_enter`, `origin_forward_exit`, `origin_reverse`, … | the replisomes entering the feature from each side, with their entry and exit times |
-
-### `--out-trajectories`
-Same format as VeloGP's, for the reference component.
-- Columns: `t`, `v0`, `vt`, `vt_stderr`, `replicationtime`. Then, for each origin (model order per chromosome; not
-  event order) and each direction `-` / `+`: `<origin><d>` (state: 0 = not started, 1 = active, 2 = finished),
-  `x.<origin><d>`, `dx.<origin><d>`, `v.<origin><d>` and `gx.<origin><d>`.
-
-### `--out-objects`, `--out-model`
-Serialized internal objects: the VeloGP objects plus the fitted mixture model and its posterior covariances. They
-are not meant for analysis; use the tables above.
+| Option | Content | Format |
+|---|---|---|
+| `--out-probabilities` | firing probability of each origin and stalling probability of each stall site | [probabilities_format.md](probabilities_format.md) |
+| `--out-abundance` | observed abundance, mixture prediction, and prediction and weight of each component | [fitted_abundance_format.md](fitted_abundance_format.md#velomix) |
+| `--out-vt` | v(t) and the number of active replisomes | [vt_format.md](vt_format.md) |
+| `--out-trajectories` | v(t) and the position and velocity of every replisome over time | [trajectories_format.md](trajectories_format.md) |
+| `--out-vx-feature-delays` | g, delays and passing replisomes of each vx feature that is not a stall site | [vx_feature_delays_format.md](vx_feature_delays_format.md) |
+| `--out-objects`, `--out-model` | serialized VeloGP and VeloMix objects | [objects_format.md](objects_format.md) |
 
 ### Plots and console output
 - `--plot-abundance`: the data (grey), the mixture fit (blue) and the VeloGP fit (orange, dashed), one panel per

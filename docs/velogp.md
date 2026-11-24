@@ -1,10 +1,13 @@
-# VeloGP: deterministic model and output formats
+# VeloGP: deterministic model
 
 VeloGP (`python -m velogp`) fits a deterministic model of replisome movement to marker-frequency (abundance) data.
-- The stochastic extension VeloMix is described in `mixture.md`.
+- The stochastic extension VeloMix is described in [velomix.md](velomix.md).
+- Usage examples are in the [README](../README.md#usage), and all file formats are listed in [the index](README.md).
 
 ## Input
-- **Abundance table:** chosen with `--columns`. The default columns are `seq,midpoint,coverage_ratio,coverage_ratio_stderr,ratio_mappable`, i.e.:
+- **Abundance table:** usually an
+  [abundance file](https://github.com/oist/MFASeqPipeline/blob/master/docs/abundance_format.md) from
+  MFASeqPipeline; the columns used are chosen with `--columns`. The default columns are `seq,midpoint,coverage_ratio,coverage_ratio_stderr,ratio_mappable`, i.e.:
   - chromosome;
   - window position;
   - abundance y_obs;
@@ -17,8 +20,10 @@ VeloGP (`python -m velogp`) fits a deterministic model of replisome movement to 
   default is the type `origin_of_replication`. Origins found by type are named `<type>1..N`, ordered by
   (chromosome, position).
 - **vx features:** the genomic intervals where replisomes may slow down. They are given by `--vx-feature-names` or
-  `--vx-feature-types`, resolved in `--gff` / `--bed` files. Each feature keeps its name and strand (+, −, or
-  unstranded). No origin may lie strictly inside a feature.
+  `--vx-feature-types`, resolved in `--gff` / `--bed` files (see [features_format.md](features_format.md)). Each
+  feature keeps its name and strand (+, −, or unstranded). Overlapping features are merged, and a feature that
+  contains an origin is split there into parts named `<name>.1`, `<name>.2`, …, since the model requires that no
+  origin lies strictly inside a feature.
 
 ## Model
 
@@ -79,76 +84,15 @@ VeloGP (`python -m velogp`) fits a deterministic model of replisome movement to 
 
 ## Output files
 
-All tables are tab-separated with one header line (gzip/bz2 if the filename ends in `.gz`/`.bz2`). Strands are
-written as `+`, `-` and `*`. Feature coordinates are 0-based half-open [begin, end) as in BED; window positions are
-as in the input.
+All tables are tab-separated with one header line (gzip/bz2 if the filename ends in `.gz`/`.bz2`).
 
-### `--out-abundance`
-One row per retained window.
-
-| column | meaning |
-|---|---|
-| `chr`, `pos` | window chromosome and position |
-| `y_obs` | observed abundance |
-| `y_obs_stderr` | s_obs (includes the overdispersion term with `--error-model`) |
-| `y_pred` | scale · P(x) |
-| `p_pred` | unscaled P(x) = exp(−λ t(x)) |
-
-### `--out-vt`
-One row per point of `h_tgrid`.
-
-| column | meaning |
-|---|---|
-| `t` | physical time [s] |
-| `vt`, `vt_stderr` | v(t) [bp/s] and its posterior std. err. |
-| `nforks` | number of active replisomes at t |
-| `replicationtime` | C [s] (constant) |
-
-### `--out-vx-feature-delays`
-One row per vx feature, in model order (by chromosome, then position).
-
-| column | meaning |
-|---|---|
-| `chr`, `begin`, `end`, `strand`, `length`, `name` | the feature |
-| `delayscale` | prior scale of the feature |
-| `g` | fitted slow-down factor (≥ 1) |
-| `delay_bp` | (g − 1) · length: the extra distance in bp at speed v |
-| `time_s`, `delay_s` | passage time and the part caused by g > 1 [s] |
-| `delay_rel` | `delay_s` / C |
-| `p_block` | equivalent blocking probability (see above) |
-| `direction` | traversal direction of the first-entering replisome × feature strand: `+` co-directional, `-` head-on, `*` unstranded or simultaneous |
-| `origin_forward`, `origin_reverse` | origin of the rightward (+) replisome from the left, and of the leftward (−) replisome from the right; `NA` if missing or never fires |
-| `origin_*_enter`, `origin_*_exit` | physical entry and exit times [s] |
-
-For the replisome that replicates the feature, the entry and exit times are actual. For the other replisome they are
-counterfactual: where it would have arrived, assuming g = 1 beyond the meeting point. NaN if that replisome is missing.
-
-### `--out-trajectories`
-One row per point of `h_tgrid`.
-
-| column | meaning |
-|---|---|
-| `t` | physical time [s] |
-| `v0` | v0_proper [bp/s] (constant) |
-| `vt`, `vt_stderr` | v(t) and its std. err. |
-| `replicationtime` | C [s] (constant) |
-| `<origin><d>` | state of each replisome: 0 not started, 1 active, 2 finished |
-| `x.<origin><d>` | position |
-| `dx.<origin><d>` | signed distance travelled |
-| `v.<origin><d>` | current velocity v(t) / g(x); NaN unless active |
-| `gx.<origin><d>` | g at the current position |
-
-There is one set of the per-replisome columns for each origin (in model order: chromosomes in genome order, origins
-by position) and each direction `d` (`-` then `+`).
-
-**Origin delays:** the firing delay of an origin is the first `t` at which its replisomes are in state 1 (both
-directions start together). The result is accurate to the grid spacing, timescale / `--vt-resolution` (by default
-0.002 doubling times). A replisome that stays in state 0 throughout never fires: its origin is replicated passively
-first.
-
-### `--out-objects`, `--out-model`
-Serialized internal objects (the fitted model, the observations and the posterior covariances), meant for re-loading
-by VeloGP tools such as VeloMix. They are not meant for analysis; use the tables above.
+| Option | Content | Format |
+|---|---|---|
+| `--out-abundance` | observed and predicted abundance of each window | [fitted_abundance_format.md](fitted_abundance_format.md) |
+| `--out-vt` | v(t) and the number of active replisomes | [vt_format.md](vt_format.md) |
+| `--out-trajectories` | v(t) and the position and velocity of every replisome over time | [trajectories_format.md](trajectories_format.md) |
+| `--out-vx-feature-delays` | g, delays and passing replisomes of each vx feature | [vx_feature_delays_format.md](vx_feature_delays_format.md) |
+| `--out-objects`, `--out-model` | serialized model, for VeloMix | [objects_format.md](objects_format.md) |
 
 ### Plots and console output
 - `--plot-abundance`: data (grey) and fit (blue), one panel per chromosome.
