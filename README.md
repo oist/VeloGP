@@ -68,7 +68,19 @@ steps for their settings.
 ## Standalone installation
 
 VeloGP needs Python ≥ 3.10 with PyTorch, NumPy, pandas, Biopython, bcbio-gff and
-matplotlib. With conda:
+matplotlib. It can be installed with pip, which also installs any of these that
+are missing:
+
+```bash
+pip install git+https://github.com/oist/VeloGP.git
+```
+
+This installs the commands `velogp` and `velomix`, which are equivalent to
+`python -m velogp` and `python -m velogp.velomix`.
+
+On Linux, pip installs the CUDA build of PyTorch by default, which is a large
+download. VeloGP runs on the CPU, so it is usually better to install the
+dependencies with conda first and then VeloGP with pip:
 
 ```bash
 conda create -n velogp -c conda-forge -c bioconda python pytorch numpy pandas biopython bcbio-gff matplotlib
@@ -79,16 +91,25 @@ conda activate velogp
 ```
 
 ```bash
-git clone git@github.com:oist/VeloGP.git
+pip install git+https://github.com/oist/VeloGP.git
 ```
 
-VeloGP is not installed as a package. Run it as `python -m velogp` and
-`python -m velogp.velomix` from the checkout, or from anywhere after adding the
-checkout to `PYTHONPATH`:
+### Running from a checkout
+
+VeloGP can also be run without installing it, as `python -m velogp` and
+`python -m velogp.velomix`, from the checkout or from anywhere after adding the
+checkout to `PYTHONPATH` (this is how MFASeqPipeline runs it):
+
+```bash
+git clone git@github.com:oist/VeloGP.git
+```
 
 ```bash
 export PYTHONPATH=/path/to/VeloGP
 ```
+
+To install a checkout in editable mode instead, so that changes to it take
+effect without reinstalling, run `pip install -e /path/to/VeloGP`.
 
 ## Usage
 

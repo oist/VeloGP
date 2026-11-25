@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "velogp"
+version = "0.1.0"
+description = "Infer replisome velocity from marker frequency analysis (MFA-seq) data"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0",
+    "numpy",
+    "pandas",
+    "biopython",
+    "bcbio-gff",
+    "matplotlib",
+]
+
+[project.urls]
+Homepage = "https://github.com/oist/VeloGP"
+
+[project.scripts]
+velogp = "velogp.cli:velogp"
+velomix = "velogp.cli:velomix"
+
+# The package stays in velogp/ at the repository root so that it can also be
+# run without installing, as `python -m velogp` with the checkout on PYTHONPATH
+# (this is how MFASeqPipeline runs it from its steps/velogp submodule).
+[tool.setuptools]
+packages = ["velogp", "velogp.velomix"]
