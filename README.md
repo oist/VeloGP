@@ -67,9 +67,8 @@ steps for their settings.
 
 ## Standalone installation
 
-VeloGP needs Python ≥ 3.10 with PyTorch, NumPy, pandas, Biopython, bcbio-gff and
-matplotlib. It can be installed with pip, which also installs any of these that
-are missing:
+VeloGP needs Python ≥ 3.10 and is installed with pip, which also installs its
+dependencies:
 
 ```bash
 pip install git+https://github.com/oist/VeloGP.git
@@ -78,20 +77,12 @@ pip install git+https://github.com/oist/VeloGP.git
 This installs the commands `velogp` and `velomix`, which are equivalent to
 `python -m velogp` and `python -m velogp.velomix`.
 
-On Linux, pip installs the CUDA build of PyTorch by default, which is a large
-download. VeloGP runs on the CPU, so it is usually better to install the
-dependencies with conda first and then VeloGP with pip:
+On Linux, pip installs the CUDA build of PyTorch by default, which is a download
+of several GB. VeloGP does not use the GPU, so to avoid this download you can
+optionally install the much smaller CPU-only build of PyTorch first:
 
 ```bash
-conda create -n velogp -c conda-forge -c bioconda python pytorch numpy pandas biopython bcbio-gff matplotlib
-```
-
-```bash
-conda activate velogp
-```
-
-```bash
-pip install git+https://github.com/oist/VeloGP.git
+pip install torch --index-url https://download.pytorch.org/whl/cpu
 ```
 
 ### Running from a checkout
