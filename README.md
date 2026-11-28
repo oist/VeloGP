@@ -1,5 +1,7 @@
 # VeloGP
 
+[![Tests](https://github.com/oist/VeloGP/actions/workflows/tests.yml/badge.svg)](https://github.com/oist/VeloGP/actions/workflows/tests.yml)
+
 ## Overview
 
 `VeloGP` infers how fast DNA replication forks (replisomes) move from
