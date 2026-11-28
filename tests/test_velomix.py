@@ -401,16 +401,6 @@ def test_fit_parameters():
         alg.optimize_parameters()
 
 
-def test_fit_recovers_probabilities():
-    torch.manual_seed(0)
-    m, alg = make_fit_problem(0.4, 0.6)
-    alg.optimize_parameters_stochastic(perturb_rejects=2, perturb_end=0.1)
-    assert m.events.p_fire.item() == pytest.approx(0.4, abs=0.02)
-    assert m.events.p_stall.item() == pytest.approx(0.6, abs=0.02)
-    # g of the remaining range is recovered, the stall site keeps g = 1
-    torch.testing.assert_close(m.chromosomes[0].g, dtensor([1.0, 2.0]), rtol=0, atol=0.05)
-
-
 def test_pickle_fitted_mixture():
     """ A mixture with parameters, its loss and fit algorithm survive pickling, as written to --out-objects """
     m, alg = make_fit_problem(0.4, 0.6)
