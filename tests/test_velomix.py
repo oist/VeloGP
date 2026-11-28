@@ -464,8 +464,10 @@ def test_cli(tmp_path):
     write_velogp_objects(objects)
     out = {k: tmp_path / f"velomix.{k}" for k in ["objs.pkl", "model.pt", "prob", "abd", "vt", "vx", "traj",
                                                    "abd.pdf", "vt.pdf"]}
-    r = run_velomix(objects, "--stall-sites", "site1:both", "--seed", "1", "--perturbation-rejects", "2",
-                    "--perturbation-min", "0.1",
+    # Starting from the VeloGP fit, the first round of the stochastic search already finds the optimum, so the
+    # search stops after the first reject to keep the test fast
+    r = run_velomix(objects, "--stall-sites", "site1:both", "--seed", "1", "--perturbation-rejects", "1",
+                    "--perturbation-reduction", "0.5", "--perturbation-min", "0.2",
                     "--out-objects", out["objs.pkl"], "--out-model", out["model.pt"], "--out-probabilities", out["prob"],
                     "--out-abundance", out["abd"], "--out-vt", out["vt"], "--out-vx-feature-delays", out["vx"],
                     "--out-trajectories", out["traj"], "--plot-abundance", out["abd.pdf"], "--plot-vt", out["vt.pdf"])
